@@ -1,0 +1,60 @@
+PROGRESS UPDATE
+Last updated: Oct 9, 2026
+Current lesson: 0.2 Set Up the Repository Layout
+
+DONE
+- 0.1 Tools: checked go, git, and docker versions
+
+FILES AND WHAT THEY DO
+- None yet
+
+DECISIONS MADE
+- Go standard library as much as possible for core components
+
+I STILL DON'T FULLY UNDERSTAND
+- None
+
+OPEN PROBLEMS
+- None fannole
+PROGRESS UPDATE
+Last updated: Oct 9, 2026
+Current lesson: 1.2 Connect Go to Postgres
+
+DONE
+- 0.1 Tools: checked go, git, and docker versions
+- 0.2 Repo: set up folder layout and git init
+- 1.1 Postgres: started postgres container in Docker
+- 1.2 Go to Postgres: verified database connection using database/sql and lib/pq
+
+FILES AND WHAT THEY DO
+- relay/main.go: connects to local Postgres database and verifies connection with Ping
+
+DECISIONS MADE
+- Use lib/pq as the standard Go driver for PostgreSQL
+
+I STILL DON'T FULLY UNDERSTAND
+- None
+
+OPEN PROBLEMS
+- None
+PROGRESS UPDATE
+Last updated: Oct 9, 2026
+Current lesson: 1.3 Create Database Tables with SQL Migrations
+
+DONE
+- 0.1 Tools: checked go, git, and docker versions
+- 0.2 Repo: set up folder layout and git init
+- 1.1 Postgres: started postgres container in Docker
+- 1.2 Go to Postgres: verified database connection using database/sql and lib/pq
+
+FILES AND WHAT THEY DO
+- relay/main.go: connects to local Postgres database and verifies connection with Ping
+
+DECISIONS MADE
+- Use lib/pq as the standard Go driver for PostgreSQL
+
+I STILL DON'T FULLY UNDERSTAND
+- None
+
+OPEN PROBLEMS
+- None
