@@ -7,9 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/gorilla/websocket"
+	"log"
 	"net/http"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 type LoginRequest struct {
@@ -267,45 +269,25 @@ func handlePairClaim(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-// HandleDispatchCommand receives API calls from mobile/curl and forwards them to the Mac agent
-func HandleDispatchCommand(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+// healthHandler reports whether the relay can reach its database.
+func healthHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 
-	var req CommandRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request payload", http.StatusBadRequest)
-		return
-	}
-
-	Hub.Lock()
-	conn, exists := Hub.clients[req.AgentID]
-	Hub.Unlock()
-
-	// FOR TESTING: If the agent is connected via WebSocket, consider it authorized
-	if !exists {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Agent not connected to WebSocket"})
-		return
-	}
+		if err := db.Ping(); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			if encErr := json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy"}); encErr != nil {
+				log.Printf("health: encode response: %v", encErr)
+			}
+			return
+		}
 
-	// Dispatch command down the WebSocket to your Mac
-	err := conn.WriteMessage(websocket.TextMessage, []byte(req.Command))
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to send command to agent"})
-		return
+		if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+			log.Printf("health: encode response: %v", err)
+		}
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":  "dispatched",
-		"agent":   req.AgentID,
-		"command": req.Command,
-	})
 }

@@ -2,11 +2,14 @@ package main
 
 import (
 	"database/sql"
-	"fmt"
-	_ "github.com/lib/pq"
 	"log"
 	"net/http"
+	"os"
+
+	_ "github.com/lib/pq"
 )
+
+const defaultAddr = "127.0.0.1:8080"
 
 func initDB(db *sql.DB) error {
 	query := `
@@ -18,17 +21,17 @@ func initDB(db *sql.DB) error {
         );
         CREATE TABLE IF NOT EXISTS pairing_codes (
             id SERIAL PRIMARY KEY,
-            user_id UUID REFERENCES users(id), 
+            user_id UUID REFERENCES users(id),
             code_hash TEXT NOT NULL,
             expires_at TIMESTAMP NOT NULL,
             used BOOLEAN DEFAULT FALSE
         );
         CREATE TABLE IF NOT EXISTS devices (
-                    id SERIAL PRIMARY KEY,
-                    user_id UUID REFERENCES users(id),
-                    agent_id TEXT UNIQUE NOT NULL,
-                    paired_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-                );
+            id SERIAL PRIMARY KEY,
+            user_id UUID REFERENCES users(id),
+            agent_id TEXT UNIQUE NOT NULL,
+            paired_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+        );
     `
 
 	_, err := db.Exec(query)
@@ -36,49 +39,48 @@ func initDB(db *sql.DB) error {
 }
 
 func main() {
+	// Load a local .env file if there is one. Real environment variables win.
+	if err := loadDotEnv(".env"); err != nil {
+		log.Printf("could not read .env: %v", err)
+	}
 
-	connStr := "host=127.0.0.1 port=5433 user=agentuser password=agentpassword dbname=agentdb sslmode=disable"
-	db, err := sql.Open("postgres", connStr)
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		log.Fatal("DATABASE_URL is not set (copy .env.example to .env)")
+	}
+
+	db, err := sql.Open("postgres", databaseURL)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close() // close the connection when main ends
-	err = db.Ping()
-	if err != nil {
-		log.Fatal(err)
+	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		log.Fatalf("cannot reach database: %v", err)
 	}
-	fmt.Println("Connected to Postgres successfully!")
-	//calling initdb
+	log.Println("Connected to Postgres")
+
 	if err := initDB(db); err != nil {
+		log.Fatalf("could not initialize database: %v", err)
+	}
+	log.Println("Database initialized")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthHandler(db))
+	mux.HandleFunc("/ws", handleWebSocket)
+	mux.HandleFunc("/command", sendCommandHandler(db))
+	mux.HandleFunc("/register", registerHandler(db))
+	mux.HandleFunc("/login", loginHandler(db))
+	mux.HandleFunc("/pair/start", handlePairStart(db))
+	mux.HandleFunc("/pair/claim", handlePairClaim(db))
+
+	addr := os.Getenv("RELAY_ADDR")
+	if addr == "" {
+		addr = defaultAddr
+	}
+
+	log.Printf("Server running on http://%s", addr)
+	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("Connected to Postgres and initialized the database!")
-	password := "mysecretpassword"
-	hash, err := HashPassword(password)
-	if err != nil {
-		log.Fatalf("Failed to hash password: %v", err)
-	}
-	fmt.Printf("Generated Hash: %s\n", hash)
-
-	match, err := CheckPassword(password, hash)
-	if err != nil || !match {
-		log.Fatalf("Password verification failed for correct password!")
-	}
-	fmt.Println("Correct password test passed!")
-
-	wrongMatch, _ := CheckPassword("wrongpassword", hash)
-	if wrongMatch {
-		log.Fatalf("Password verification succeeded for wrong password!")
-	}
-	http.HandleFunc("/ws", handleWebSocket)
-	http.HandleFunc("/command", sendCommandHandler(db))
-	fmt.Println("Wrong password test passed!")
-	http.HandleFunc("/register", registerHandler(db))
-	http.HandleFunc("/login", loginHandler(db))
-	http.HandleFunc("/pair/start", handlePairStart(db))
-	http.HandleFunc("/pair/claim", handlePairClaim(db))
-	http.HandleFunc("/ws", HandleWebSocket)
-	http.HandleFunc("/command", HandleDispatchCommand)
-	log.Println("Server running on http://localhost:8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
 }
