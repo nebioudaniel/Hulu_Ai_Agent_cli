@@ -312,20 +312,46 @@ func handlePairClaim(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		// The claimed agent_id must not already belong to another account.
+		// Claiming never changes an owner: that would be a takeover.
+		var owner string
+		ownerErr := db.QueryRow("SELECT user_id FROM devices WHERE agent_id = $1", req.AgentID).Scan(&owner)
+		switch ownerErr {
+		case nil:
+			if owner != userID {
+				http.Error(w, "Agent already belongs to another account", http.StatusConflict)
+				return
+			}
+		case sql.ErrNoRows:
+			// Fresh agent; inserted below.
+		default:
+			http.Error(w, "Database error", http.StatusInternalServerError)
+			return
+		}
+
 		if _, err := db.Exec("UPDATE pairing_codes SET used = true WHERE id = $1", codeID); err != nil {
 			http.Error(w, "Database error", http.StatusInternalServerError)
 			return
 		}
 
-		_, err = db.Exec(
-			`INSERT INTO devices (user_id, agent_id)
-			 VALUES ($1, $2)
-			 ON CONFLICT (agent_id) DO UPDATE SET user_id = $1, paired_at = NOW(), revoked_at = NULL`,
-			userID, req.AgentID,
-		)
-		if err != nil {
-			http.Error(w, "Failed to register paired device", http.StatusInternalServerError)
-			return
+		if ownerErr == nil {
+			// Re-pairing the user's own agent refreshes it, owner unchanged.
+			if _, err := db.Exec(
+				`UPDATE devices SET revoked_at = NULL, paired_at = NOW()
+				 WHERE agent_id = $1 AND user_id = $2`,
+				req.AgentID, userID,
+			); err != nil {
+				http.Error(w, "Database error", http.StatusInternalServerError)
+				return
+			}
+		} else {
+			if _, err := db.Exec(
+				"INSERT INTO devices (user_id, agent_id) VALUES ($1, $2)",
+				userID, req.AgentID,
+			); err != nil {
+				http.Error(w, "Failed to register paired device", http.StatusInternalServerError)
+				return
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -565,7 +591,7 @@ func deviceTokenHandler(db *sql.DB) http.HandlerFunc {
 			`INSERT INTO devices (user_id, agent_id, token_hash, revoked_at)
 			 VALUES ($1, $2, $3, NULL)
 			 ON CONFLICT (agent_id) DO UPDATE
-			 SET user_id = $1, token_hash = $3, revoked_at = NULL, paired_at = NOW()`,
+			 SET token_hash = $3, revoked_at = NULL, paired_at = NOW()`,
 			userID, req.AgentID, hashToken(raw),
 		)
 		if err != nil {

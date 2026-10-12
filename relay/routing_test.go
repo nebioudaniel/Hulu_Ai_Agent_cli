@@ -190,6 +190,73 @@ func TestRoutingAndPeers(t *testing.T) {
 	}
 }
 
+// TestAgentOwnershipCannotBeStolen: a second user cannot take over or un-revoke
+// another user's agent or device.
+func TestAgentOwnershipCannotBeStolen(t *testing.T) {
+	db := testDB(t)
+	defer db.Close()
+	cleanDB(t, db)
+
+	store := dbSessionStore{db: db}
+	srv := httptest.NewServer(newMux(db, store))
+	defer srv.Close()
+
+	callRegister(t, db, "alice@example.com", "alice-password")
+	callRegister(t, db, "bob@example.com", "bob-password")
+	tokenA := callLogin(t, db, "alice@example.com", "alice-password")
+	tokenB := callLogin(t, db, "bob@example.com", "bob-password")
+
+	devTokenA := pairAndToken(t, srv.URL, tokenA, "agent-owned")
+
+	// Bob cannot claim Alice's agent via /pair/claim (409, owner unchanged).
+	status, start := livePost(t, srv.URL, "/pair/start", tokenB, "", map[string]string{})
+	if status != http.StatusCreated {
+		t.Fatalf("bob pair/start: got %d", status)
+	}
+	status, _ = livePost(t, srv.URL, "/pair/claim", tokenB, "", map[string]string{
+		"pairing_code": start["pairing_code"].(string),
+		"agent_id":     "agent-owned",
+	})
+	if status != http.StatusConflict {
+		t.Fatalf("bob claiming alice's agent should be 409, got %d", status)
+	}
+
+	// Bob cannot mint a device token for Alice's agent.
+	status, _ = livePost(t, srv.URL, "/devices/token", tokenB, "", map[string]string{"agent_id": "agent-owned"})
+	if status != http.StatusForbidden {
+		t.Fatalf("bob device token on alice's agent should be 403, got %d", status)
+	}
+
+	// Bob cannot revoke Alice's agent.
+	status, _ = livePost(t, srv.URL, "/devices/revoke", tokenB, "", map[string]string{"agent_id": "agent-owned"})
+	if status != http.StatusNotFound {
+		t.Fatalf("bob revoking alice's agent should be 404, got %d", status)
+	}
+
+	// Alice's device is untouched and still works; the owner never changed.
+	status, _ = livePost(t, srv.URL, "/ws/ticket", "", devTokenA,
+		map[string]string{"role": "agent", "agent_id": "agent-owned"})
+	if status != http.StatusOK {
+		t.Fatalf("alice's device token should still work, got %d", status)
+	}
+
+	var ownerID string
+	if err := db.QueryRow(
+		"SELECT user_id FROM devices WHERE agent_id = 'agent-owned'",
+	).Scan(&ownerID); err != nil {
+		t.Fatalf("load device owner: %v", err)
+	}
+	var aliceID string
+	if err := db.QueryRow(
+		"SELECT id FROM users WHERE email = 'alice@example.com'",
+	).Scan(&aliceID); err != nil {
+		t.Fatalf("load alice id: %v", err)
+	}
+	if ownerID != aliceID {
+		t.Fatalf("owner changed: got %s want %s", ownerID, aliceID)
+	}
+}
+
 // TestDeviceTokenControlsAgentIdentity: a device token is bound to one agent.
 func TestDeviceTokenControlsAgentIdentity(t *testing.T) {
 	db := testDB(t)
