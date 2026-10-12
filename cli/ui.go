@@ -81,7 +81,7 @@ type model struct {
 	pendingApproval pendingApproval
 }
 
-// pendingApproval tracks a risky command waiting for the phone's answer.
+// pendingApproval tracks a command waiting for the phone's answer.
 type pendingApproval struct {
 	requestID string
 	cmdStr    string
@@ -308,11 +308,18 @@ func chatCmd(conn *websocket.Conn, prompt string, provider ProviderConfig) tea.C
 	}
 }
 
-// executeAndRespond runs a shell command inside the project folder and sends
-// the output back through the WebSocket.
+// executeAndRespond runs a command inside the project folder and sends the
+// output back through the WebSocket. Allowlisted commands run with explicit
+// arguments and no shell; anything approved on the phone runs through a shell.
 func executeAndRespond(conn *websocket.Conn, projectDir, cmdStr string) tea.Cmd {
 	return func() tea.Msg {
-		response, isErr := runCommand(projectDir, cmdStr)
+		var response string
+		var isErr bool
+		if argv, ok := allowlistEntry(cmdStr); ok && !containsShellChars(cmdStr) {
+			response, isErr = runDirect(projectDir, argv)
+		} else {
+			response, isErr = runCommand(projectDir, cmdStr)
+		}
 		sendResult(conn, cmdStr, response, isErr)
 		_ = logEvent("command_executed", map[string]any{
 			"command": cmdStr,
@@ -478,25 +485,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, listenForCommands(m.conn)
 		}
 
-		// Risky commands need the phone to approve within 60 seconds.
-		if isRisky(msg.cmdStr) {
-			id := newRequestID()
-			m.pendingApproval = pendingApproval{requestID: id, cmdStr: msg.cmdStr}
-			sendApprovalRequest(m.conn, id, msg.cmdStr)
-			m.statusMsg = "Risky command — waiting for phone approval (60s)"
-			_ = logEvent("approval_requested", map[string]any{"command": msg.cmdStr, "request_id": id})
+		// Allowlisted commands run immediately, without a shell. Everything
+		// else needs the phone to approve within 60 seconds (denied by
+		// default).
+		if isAutoRun(msg.cmdStr) {
+			m.statusMsg = fmt.Sprintf("Executing: %s", msg.cmdStr)
 			return m, tea.Batch(
+				executeAndRespond(m.conn, m.projectDir, msg.cmdStr),
 				listenForCommands(m.conn),
-				tea.Tick(approvalTimeout, func(t time.Time) tea.Msg {
-					return approvalTimeoutMsg{requestID: id}
-				}),
 			)
 		}
 
-		m.statusMsg = fmt.Sprintf("Executing: %s", msg.cmdStr)
+		id := newRequestID()
+		m.pendingApproval = pendingApproval{requestID: id, cmdStr: msg.cmdStr}
+		sendApprovalRequest(m.conn, id, msg.cmdStr)
+		m.statusMsg = "Command needs approval — waiting for phone (60s)"
+		_ = logEvent("approval_requested", map[string]any{"command": msg.cmdStr, "request_id": id})
 		return m, tea.Batch(
-			executeAndRespond(m.conn, m.projectDir, msg.cmdStr),
 			listenForCommands(m.conn),
+			tea.Tick(approvalTimeout, func(t time.Time) tea.Msg {
+				return approvalTimeoutMsg{requestID: id}
+			}),
 		)
 
 	case approvalResponseMsg:

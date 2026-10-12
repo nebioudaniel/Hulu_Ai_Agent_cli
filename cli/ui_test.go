@@ -16,15 +16,23 @@ func TestRiskyCommandRequiresApproval(t *testing.T) {
 	m := testModel(t)
 	updated, _ := m.Update(commandMsg{cmdStr: "rm -rf /"})
 	if updated.(model).pendingApproval.requestID == "" {
-		t.Fatal("a risky command should open a pending approval")
+		t.Fatal("a command outside the allowlist should open a pending approval")
+	}
+}
+
+func TestShellCharCommandRequiresApproval(t *testing.T) {
+	m := testModel(t)
+	updated, _ := m.Update(commandMsg{cmdStr: "ls; echo hi"})
+	if updated.(model).pendingApproval.requestID == "" {
+		t.Fatal("an allowlisted word with shell chars should still require approval")
 	}
 }
 
 func TestSafeCommandNeedsNoApproval(t *testing.T) {
 	m := testModel(t)
-	updated, _ := m.Update(commandMsg{cmdStr: "ls -la"})
+	updated, _ := m.Update(commandMsg{cmdStr: "ls"})
 	if updated.(model).pendingApproval.requestID != "" {
-		t.Fatal("a safe command should not need approval")
+		t.Fatal("an allowlisted command should not need approval")
 	}
 }
 
