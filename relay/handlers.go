@@ -104,7 +104,7 @@ func loginHandler(db *sql.DB) http.HandlerFunc {
 		w.Write([]byte("Login successful!"))
 	}
 }
-func sendCommandHandler() http.HandlerFunc {
+func sendCommandHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -117,7 +117,15 @@ func sendCommandHandler() http.HandlerFunc {
 			return
 		}
 
-		// Find connected agent in our WebSocket manager
+		// 1. Verify that the agent is actually paired/registered in the database
+		var deviceID int
+		err := db.QueryRow("SELECT id FROM devices WHERE agent_id = $1", req.AgentID).Scan(&deviceID)
+		if err != nil {
+			http.Error(w, "Unauthorized: Agent is not paired", http.StatusForbidden)
+			return
+		}
+
+		// 2. Find connected agent in our WebSocket manager
 		manager.mu.Lock()
 		agentConn, exists := manager.agents[req.AgentID]
 		manager.mu.Unlock()
@@ -127,8 +135,8 @@ func sendCommandHandler() http.HandlerFunc {
 			return
 		}
 
-		// Send command down the WebSocket to the agent CLI
-		err := agentConn.WriteMessage(websocket.TextMessage, []byte(req.Command))
+		// 3. Send command down the WebSocket to the agent CLI
+		err = agentConn.WriteMessage(websocket.TextMessage, []byte(req.Command))
 		if err != nil {
 			http.Error(w, "Failed to send command", http.StatusInternalServerError)
 			return
@@ -231,11 +239,21 @@ func handlePairClaim(db *sql.DB) http.HandlerFunc {
 
 		// 3. Mark the pairing code as used (one-time use protection)
 		_, err = db.Exec("UPDATE pairing_codes SET used = true WHERE id = $1", codeID)
-		if err != nil {
-			http.Error(w, "Database error", http.StatusInternalServerError)
-			return
-		}
-
+				if err != nil {
+					http.Error(w, "Database error", http.StatusInternalServerError)
+					return
+				}
+		
+				// 4. Register the agent as paired to this user!
+				_, err = db.Exec(`
+					INSERT INTO devices (user_id, agent_id) 
+					VALUES ($1, $2) 
+					ON CONFLICT (agent_id) DO UPDATE SET user_id = $1, paired_at = NOW()
+				`, userID, req.AgentID)
+				if err != nil {
+					http.Error(w, "Failed to register paired device", http.StatusInternalServerError)
+					return
+				}
 		// Success response
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
@@ -243,3 +261,4 @@ func handlePairClaim(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+

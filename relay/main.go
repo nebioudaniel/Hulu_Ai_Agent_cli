@@ -23,6 +23,12 @@ func initDB(db *sql.DB) error {
             expires_at TIMESTAMP NOT NULL,
             used BOOLEAN DEFAULT FALSE
         );
+        CREATE TABLE IF NOT EXISTS devices (
+                    id SERIAL PRIMARY KEY,
+                    user_id UUID REFERENCES users(id),
+                    agent_id TEXT UNIQUE NOT NULL,
+                    paired_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                );
     `
 
 	_, err := db.Exec(query)
@@ -65,7 +71,7 @@ func main() {
 			log.Fatalf("Password verification succeeded for wrong password!")
 		}
 		http.HandleFunc("/ws", handleWebSocket)
-		http.HandleFunc("/command", sendCommandHandler())
+		http.HandleFunc("/command", sendCommandHandler(db))
 		fmt.Println("Wrong password test passed!")
 		http.HandleFunc("/register", registerHandler(db))
 		http.HandleFunc("/login", loginHandler(db))
