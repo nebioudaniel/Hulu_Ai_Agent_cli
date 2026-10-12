@@ -195,6 +195,32 @@ func TestAuthAndPairingFlow(t *testing.T) {
 	}
 }
 
+func TestExpiredTicketRejected(t *testing.T) {
+	db := testDB(t)
+	defer db.Close()
+	cleanDB(t, db)
+
+	callRegister(t, db, "dave@example.com", "dave-password")
+
+	var userID string
+	if err := db.QueryRow("SELECT id FROM users WHERE email='dave@example.com'").Scan(&userID); err != nil {
+		t.Fatalf("load user: %v", err)
+	}
+
+	raw := "expired-ticket"
+	if _, err := db.Exec(
+		`INSERT INTO ws_tickets (user_id, role, agent_id, token_hash, expires_at)
+		 VALUES ($1, 'agent', 'a1', $2, $3)`,
+		userID, hashToken(raw), time.Now().UTC().Add(-time.Minute),
+	); err != nil {
+		t.Fatalf("insert ticket: %v", err)
+	}
+
+	if _, err := consumeTicket(context.Background(), db, raw); err == nil {
+		t.Fatal("an expired ticket should be rejected")
+	}
+}
+
 func TestExpiredSessionRejected(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
