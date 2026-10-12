@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -60,6 +61,7 @@ type LogEntry struct {
 type model struct {
 	serverAddr  string
 	agentID     string
+	token       string
 	connected   bool
 	statusMsg   string
 	conn        *websocket.Conn
@@ -76,6 +78,7 @@ type model struct {
 // Custom messages
 type connectedMsg struct{ conn *websocket.Conn }
 type errMsg struct{ err error }
+type authErrMsg struct{ err error }
 type commandMsg struct{ cmdStr string }
 type commandResultMsg struct {
 	cmdStr string
@@ -88,19 +91,29 @@ type pairingFetchedMsg struct {
 	err  string
 }
 
-func initialModel(serverAddr, agentID string) model {
+func initialModel(serverAddr, agentID, token string) model {
 	return model{
 		serverAddr: serverAddr,
 		agentID:    agentID,
+		token:      token,
 		connected:  false,
 		statusMsg:  "Connecting to relay server...",
 	}
 }
 
-// Async WebSocket connection
-func connectWebSocket(serverAddr, agentID string) tea.Cmd {
+// Async WebSocket connection. A short-lived one-time ticket is fetched first,
+// so the long-lived session token never appears in a URL.
+func connectWebSocket(serverAddr, token, agentID string) tea.Cmd {
 	return func() tea.Msg {
-		wsURL := fmt.Sprintf("ws://%s/ws?role=agent&client_id=%s", serverAddr, agentID)
+		ticket, status, err := fetchTicket(serverAddr, token, "agent", agentID)
+		if err != nil {
+			if status == http.StatusUnauthorized {
+				return authErrMsg{err: err}
+			}
+			return errMsg{err: err}
+		}
+
+		wsURL := fmt.Sprintf("ws://%s/ws?ticket=%s", serverAddr, url.QueryEscape(ticket))
 		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 		if err != nil {
 			return errMsg{err: err}
@@ -152,15 +165,25 @@ func executeAndRespond(conn *websocket.Conn, cmdStr string) tea.Cmd {
 }
 
 // Fetch pairing code from server asynchronously
-func fetchPairingCode(serverAddr string) tea.Cmd {
+func fetchPairingCode(serverAddr, token string) tea.Cmd {
 	return func() tea.Msg {
 		apiURL := fmt.Sprintf("http://%s/pair/start", serverAddr)
-		resp, err := http.Post(apiURL, "application/json", bytes.NewBuffer([]byte("{}")))
+		req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewBuffer([]byte("{}")))
+		if err != nil {
+			return pairingFetchedMsg{err: "Pairing request failed"}
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return pairingFetchedMsg{err: "Pairing request failed"}
 		}
 		defer resp.Body.Close()
 
+		if resp.StatusCode == http.StatusUnauthorized {
+			return pairingFetchedMsg{err: "Session expired. Restart to log in."}
+		}
 		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 			return pairingFetchedMsg{err: "Server auth/DB error"}
 		}
@@ -229,7 +252,7 @@ func renderMiniQR(q *qrcode.QRCode, factor int) string {
 }
 
 func (m model) Init() tea.Cmd {
-	return connectWebSocket(m.serverAddr, m.agentID)
+	return connectWebSocket(m.serverAddr, m.token, m.agentID)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -254,7 +277,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pairingErr = ""
 			if m.showPairing && m.pairingCode == "" {
 				m.statusMsg = "Generating pairing code..."
-				return m, fetchPairingCode(m.serverAddr)
+				return m, fetchPairingCode(m.serverAddr, m.token)
 			}
 		}
 		// Toggle logs view on 'ctrl+p'
@@ -295,11 +318,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "Pairing code generated!"
 		}
 
+	case authErrMsg:
+		m.connected = false
+		m.statusMsg = "Session expired. Restart to log in."
+		return m, nil
+
 	case errMsg:
 		m.connected = false
 		m.statusMsg = "Connection failed (Retrying...)"
 		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
-			return connectWebSocket(m.serverAddr, m.agentID)()
+			return connectWebSocket(m.serverAddr, m.token, m.agentID)()
 		})
 	}
 

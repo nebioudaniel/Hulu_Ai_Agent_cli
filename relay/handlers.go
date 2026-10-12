@@ -2,13 +2,13 @@ package main
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -27,7 +27,20 @@ type CommandRequest struct {
 	Command string `json:"command"`
 }
 
-// Helper to generate a random pairing code string
+// Rate limiters. Kept in memory; fine for one relay process.
+var (
+	loginLimiter = newRateLimiter(10, 15*time.Minute)
+	pairLimiter  = newRateLimiter(5, 15*time.Minute)
+)
+
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
 // Generate a cryptographically secure pairing code.
 func generateRandomCode() (string, error) {
 	randomBytes := make([]byte, 16)
@@ -74,9 +87,14 @@ func registerHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte("User registered successfully"))
+		if _, err := w.Write([]byte("User registered successfully")); err != nil {
+			log.Printf("register: write response: %v", err)
+		}
 	}
 }
+
+// loginHandler checks the password and returns a fresh session token. Only the
+// sha256 of the token is stored.
 func loginHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -90,29 +108,75 @@ func loginHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Find user in database by email
-		var storedHash string
-		err := db.QueryRow("SELECT password_hash FROM users WHERE email = $1", req.Email).Scan(&storedHash)
+		if req.Email == "" || req.Password == "" {
+			http.Error(w, "Email and password are required", http.StatusBadRequest)
+			return
+		}
+
+		// Limit by client IP and by email address.
+		if !loginLimiter.allow("ip:" + clientIP(r)) {
+			http.Error(w, "Too many login attempts, try again later", http.StatusTooManyRequests)
+			return
+		}
+		if !loginLimiter.allow("email:" + strings.ToLower(req.Email)) {
+			http.Error(w, "Too many login attempts, try again later", http.StatusTooManyRequests)
+			return
+		}
+
+		var userID, storedHash string
+		err := db.QueryRow(
+			"SELECT id, password_hash FROM users WHERE email = $1",
+			req.Email,
+		).Scan(&userID, &storedHash)
 		if err != nil {
 			http.Error(w, "Invalid email or password", http.StatusUnauthorized)
 			return
 		}
 
-		// Verify password using Argon2id check
 		match, err := CheckPassword(req.Password, storedHash)
 		if err != nil || !match {
 			http.Error(w, "Invalid email or password", http.StatusUnauthorized)
 			return
 		}
 
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Login successful!"))
+		raw, err := newToken()
+		if err != nil {
+			http.Error(w, "Failed to create session", http.StatusInternalServerError)
+			return
+		}
+
+		expiresAt := time.Now().UTC().Add(sessionTTL)
+		_, err = db.Exec(
+			"INSERT INTO sessions (user_id, token_hash, expires_at) VALUES ($1, $2, $3)",
+			userID, hashToken(raw), expiresAt,
+		)
+		if err != nil {
+			http.Error(w, "Failed to create session", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]string{
+			"token":      raw,
+			"expires_at": expiresAt.Format(time.RFC3339),
+		}); err != nil {
+			log.Printf("login: encode response: %v", err)
+		}
 	}
 }
+
+// sendCommandHandler forwards a command to the authenticated user's paired
+// agent. The user comes from the session token, not from the request body.
 func sendCommandHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		userID := userIDFromContext(r.Context())
+		if userID == "" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
@@ -122,37 +186,36 @@ func sendCommandHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// 1. Verify that the agent is actually paired/registered in the database
+		// The agent must be paired to this user and not revoked.
 		var deviceID int
-		err := db.QueryRow("SELECT id FROM devices WHERE agent_id = $1", req.AgentID).Scan(&deviceID)
+		err := db.QueryRow(
+			"SELECT id FROM devices WHERE agent_id = $1 AND user_id = $2 AND revoked_at IS NULL",
+			req.AgentID, userID,
+		).Scan(&deviceID)
 		if err != nil {
-			http.Error(w, "Unauthorized: Agent is not paired", http.StatusForbidden)
+			http.Error(w, "Agent is not paired to this account", http.StatusForbidden)
 			return
 		}
 
-		// 2. Find connected agent in our WebSocket manager
-		manager.mu.Lock()
-		agentConn, exists := manager.agents[req.AgentID]
-		manager.mu.Unlock()
-
+		agent, exists := manager.agent(req.AgentID)
 		if !exists {
 			http.Error(w, "Agent offline or not found", http.StatusNotFound)
 			return
 		}
 
-		// 3. Send command down the WebSocket to the agent CLI
-		err = agentConn.WriteMessage(websocket.TextMessage, []byte(req.Command))
-		if err != nil {
+		if err := agent.conn.WriteMessage(websocket.TextMessage, []byte(req.Command)); err != nil {
 			http.Error(w, "Failed to send command", http.StatusInternalServerError)
 			return
 		}
 
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Command dispatched to agent successfully!"))
+		if _, err := w.Write([]byte("Command dispatched to agent successfully!")); err != nil {
+			log.Printf("command: write response: %v", err)
+		}
 	}
 }
 
-// Handler for POST /pair/start
+// handlePairStart creates a one-time pairing code for the authenticated user.
 func handlePairStart(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -160,56 +223,49 @@ func handlePairStart(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// TODO: Replace this with the authenticated user's ID.
-		// Your users table uses UUID, so userID must be a UUID string.
-		userID := "7b91f6be-9bf1-4151-a20f-b3920fbc1f9c"
+		userID := userIDFromContext(r.Context())
 		if userID == "" {
-			http.Error(w, "Authentication required", http.StatusUnauthorized)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		// 1. Generate a random pairing code.
+		if !pairLimiter.allow("user:" + userID) {
+			http.Error(w, "Too many pairing attempts, try again later", http.StatusTooManyRequests)
+			return
+		}
+
 		plainCode, err := generateRandomCode()
 		if err != nil {
-			http.Error(w, "Failed to generate code",
-				http.StatusInternalServerError)
+			http.Error(w, "Failed to generate code", http.StatusInternalServerError)
 			return
 		}
 
-		// 2. Hash the code before storing it.
-		hashBytes := sha256.Sum256([]byte(plainCode))
-		codeHash := hex.EncodeToString(hashBytes[:])
-
-		// 3. Expire the code after two minutes.
+		codeHash := hashToken(plainCode)
 		expiresAt := time.Now().UTC().Add(2 * time.Minute)
 
-		// 4. Save the pairing code hash.
-		query := `
-			INSERT INTO pairing_codes (user_id, code_hash, expires_at, used)
-			VALUES ($1, $2, $3, FALSE)
-		`
-
-		_, err = db.Exec(query, userID, codeHash, expiresAt)
+		_, err = db.Exec(
+			`INSERT INTO pairing_codes (user_id, code_hash, expires_at, used)
+			 VALUES ($1, $2, $3, FALSE)`,
+			userID, codeHash, expiresAt,
+		)
 		if err != nil {
-			http.Error(w, "Failed to save pairing code",
-				http.StatusInternalServerError)
+			http.Error(w, "Failed to save pairing code", http.StatusInternalServerError)
 			return
 		}
 
-		// 5. Return the plaintext code to the client.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-
 		if err := json.NewEncoder(w).Encode(map[string]string{
 			"pairing_code": plainCode,
 			"expires_at":   expiresAt.Format(time.RFC3339),
 		}); err != nil {
-			fmt.Println("Failed to write pairing response:", err)
+			log.Printf("pair/start: encode response: %v", err)
 		}
 	}
 }
 
-// Handler for POST /pair/claim
+// handlePairClaim pairs an agent to the authenticated user's account. The
+// pairing code must belong to the same user.
 func handlePairClaim(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -217,55 +273,200 @@ func handlePairClaim(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		userID := userIDFromContext(r.Context())
+		if userID == "" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
 		var req struct {
 			PairingCode string `json:"pairing_code"`
 			AgentID     string `json:"agent_id"`
 		}
-
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
 		}
+		if req.PairingCode == "" || req.AgentID == "" {
+			http.Error(w, "pairing_code and agent_id are required", http.StatusBadRequest)
+			return
+		}
 
-		// 1. Hash the incoming code to match what's in the DB
-		hashBytes := sha256.Sum256([]byte(req.PairingCode))
-		codeHash := hex.EncodeToString(hashBytes[:])
+		codeHash := hashToken(req.PairingCode)
 
-		// 2. Query the database for a valid, unused, unexpired code
 		var codeID int
-		var userID string
-		query := `
-			SELECT id, user_id FROM pairing_codes 
-			WHERE code_hash = $1 AND used = false AND expires_at > NOW()
-		`
-		err := db.QueryRow(query, codeHash).Scan(&codeID, &userID)
+		var codeUserID string
+		err := db.QueryRow(
+			`SELECT id, user_id FROM pairing_codes
+			 WHERE code_hash = $1 AND used = false AND expires_at > NOW()`,
+			codeHash,
+		).Scan(&codeID, &codeUserID)
 		if err != nil {
 			http.Error(w, "Invalid, expired, or already used pairing code", http.StatusBadRequest)
 			return
 		}
 
-		// 3. Mark the pairing code as used (one-time use protection)
-		_, err = db.Exec("UPDATE pairing_codes SET used = true WHERE id = $1", codeID)
+		// The code must belong to the same account that is claiming it.
+		if codeUserID != userID {
+			http.Error(w, "Pairing code does not belong to this account", http.StatusForbidden)
+			return
+		}
+
+		if _, err := db.Exec("UPDATE pairing_codes SET used = true WHERE id = $1", codeID); err != nil {
+			http.Error(w, "Database error", http.StatusInternalServerError)
+			return
+		}
+
+		_, err = db.Exec(
+			`INSERT INTO devices (user_id, agent_id)
+			 VALUES ($1, $2)
+			 ON CONFLICT (agent_id) DO UPDATE SET user_id = $1, paired_at = NOW(), revoked_at = NULL`,
+			userID, req.AgentID,
+		)
+		if err != nil {
+			http.Error(w, "Failed to register paired device", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]string{
+			"message": "Device successfully paired!",
+		}); err != nil {
+			log.Printf("pair/claim: encode response: %v", err)
+		}
+	}
+}
+
+// revokeDeviceHandler marks one of the user's devices as revoked and drops any
+// live WebSocket connection for it.
+func revokeDeviceHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		userID := userIDFromContext(r.Context())
+		if userID == "" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		var req struct {
+			AgentID string `json:"agent_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.AgentID == "" {
+			http.Error(w, "agent_id is required", http.StatusBadRequest)
+			return
+		}
+
+		res, err := db.Exec(
+			"UPDATE devices SET revoked_at = NOW() WHERE agent_id = $1 AND user_id = $2",
+			req.AgentID, userID,
+		)
 		if err != nil {
 			http.Error(w, "Database error", http.StatusInternalServerError)
 			return
 		}
 
-		// 4. Register the agent as paired to this user!
-		_, err = db.Exec(`
-					INSERT INTO devices (user_id, agent_id) 
-					VALUES ($1, $2) 
-					ON CONFLICT (agent_id) DO UPDATE SET user_id = $1, paired_at = NOW()
-				`, userID, req.AgentID)
+		affected, err := res.RowsAffected()
 		if err != nil {
-			http.Error(w, "Failed to register paired device", http.StatusInternalServerError)
+			http.Error(w, "Database error", http.StatusInternalServerError)
 			return
 		}
-		// Success response
+		if affected == 0 {
+			http.Error(w, "Device not found", http.StatusNotFound)
+			return
+		}
+
+		manager.DisconnectAgent(req.AgentID)
+
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"message": "Device successfully paired!",
-		})
+		if err := json.NewEncoder(w).Encode(map[string]string{
+			"message": "Device revoked",
+		}); err != nil {
+			log.Printf("devices/revoke: encode response: %v", err)
+		}
+	}
+}
+
+// wsTicketHandler issues a short-lived, one-time ticket used to open a
+// WebSocket. The long-lived session token stays in the Authorization header and
+// never appears in a URL.
+func wsTicketHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		userID := userIDFromContext(r.Context())
+		if userID == "" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		var req struct {
+			Role    string `json:"role"`
+			AgentID string `json:"agent_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if req.Role != "agent" && req.Role != "app" {
+			http.Error(w, "role must be \"agent\" or \"app\"", http.StatusBadRequest)
+			return
+		}
+		if req.Role == "agent" && req.AgentID == "" {
+			http.Error(w, "agent_id is required for role agent", http.StatusBadRequest)
+			return
+		}
+
+		// An agent id belongs to at most one user. For role app, agent_id is
+		// the optional target agent and must belong to the same user.
+		if req.AgentID != "" {
+			var owner string
+			err := db.QueryRow("SELECT user_id FROM devices WHERE agent_id = $1", req.AgentID).Scan(&owner)
+			if err == nil && owner != userID {
+				http.Error(w, "Agent belongs to another account", http.StatusForbidden)
+				return
+			}
+			if err != nil && err != sql.ErrNoRows {
+				http.Error(w, "Database error", http.StatusInternalServerError)
+				return
+			}
+		}
+
+		ticket, err := newToken()
+		if err != nil {
+			http.Error(w, "Failed to create ticket", http.StatusInternalServerError)
+			return
+		}
+
+		expiresAt := time.Now().UTC().Add(ticketTTL)
+		_, err = db.Exec(
+			`INSERT INTO ws_tickets (user_id, role, agent_id, token_hash, expires_at)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			userID, req.Role, sql.NullString{String: req.AgentID, Valid: req.AgentID != ""}, hashToken(ticket), expiresAt,
+		)
+		if err != nil {
+			http.Error(w, "Failed to create ticket", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]string{
+			"ticket":     ticket,
+			"expires_at": expiresAt.Format(time.RFC3339),
+		}); err != nil {
+			log.Printf("ws/ticket: encode response: %v", err)
+		}
 	}
 }
 
