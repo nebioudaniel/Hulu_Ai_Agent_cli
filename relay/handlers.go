@@ -3,6 +3,7 @@ import (
 	"net/http"
 	"database/sql"
 	"encoding/json"
+	"github.com/gorilla/websocket"
 )
 type LoginRequest struct {
 	Email    string `json:"email"`
@@ -11,6 +12,10 @@ type LoginRequest struct {
 type RegisterRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+}
+type CommandRequest struct {
+	AgentID string `json:"agent_id"`
+	Command string `json:"command"`
 }
 
 func registerHandler(db *sql.DB) http.HandlerFunc {
@@ -81,5 +86,39 @@ func loginHandler(db *sql.DB) http.HandlerFunc {
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Login successful!"))
+	}
+}
+func sendCommandHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req CommandRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		// Find connected agent in our WebSocket manager
+		manager.mu.Lock()
+		agentConn, exists := manager.agents[req.AgentID]
+		manager.mu.Unlock()
+
+		if !exists {
+			http.Error(w, "Agent offline or not found", http.StatusNotFound)
+			return
+		}
+
+		// Send command down the WebSocket to the agent CLI
+		err := agentConn.WriteMessage(websocket.TextMessage, []byte(req.Command))
+		if err != nil {
+			http.Error(w, "Failed to send command", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Command dispatched to agent successfully!"))
 	}
 }

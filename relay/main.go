@@ -58,6 +58,7 @@ func main() {
 			log.Fatalf("Password verification succeeded for wrong password!")
 		}
 		http.HandleFunc("/ws", handleWebSocket)
+		http.HandleFunc("/command", sendCommandHandler())
 		fmt.Println("Wrong password test passed!")
 		http.HandleFunc("/register", registerHandler(db))
 		http.HandleFunc("/login", loginHandler(db))
