@@ -148,8 +148,7 @@ func handlePairStart(db *sql.DB) http.HandlerFunc {
 
 		// TODO: Replace this with the authenticated user's ID.
 		// Your users table uses UUID, so userID must be a UUID string.
-		userID := "" // Replace with a real existing user's UUID for testing.
-
+   userID := "7b91f6be-9bf1-4151-a20f-b3920fbc1f9c"
 		if userID == "" {
 			http.Error(w, "Authentication required", http.StatusUnauthorized)
 			return
