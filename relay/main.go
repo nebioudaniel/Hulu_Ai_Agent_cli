@@ -16,6 +16,13 @@ func initDB(db *sql.DB) error {
             password_hash TEXT NOT NULL,
             created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS pairing_codes (
+            id SERIAL PRIMARY KEY,
+            user_id UUID REFERENCES users(id), 
+            code_hash TEXT NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            used BOOLEAN DEFAULT FALSE
+        );
     `
 
 	_, err := db.Exec(query)
@@ -62,7 +69,7 @@ func main() {
 		fmt.Println("Wrong password test passed!")
 		http.HandleFunc("/register", registerHandler(db))
 		http.HandleFunc("/login", loginHandler(db))
-		
+		http.HandleFunc("/pair/start", handlePairStart(db))
 		log.Println("Server running on http://localhost:8080")
 		log.Fatal(http.ListenAndServe(":8080", nil))
 }

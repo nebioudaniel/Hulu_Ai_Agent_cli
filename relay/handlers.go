@@ -4,6 +4,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"github.com/gorilla/websocket"
+	"crypto/rand"
+	"encoding/hex"
+	"time"
+	"fmt"
+	"crypto/sha256"
 )
 type LoginRequest struct {
 	Email    string `json:"email"`
@@ -16,6 +21,17 @@ type RegisterRequest struct {
 type CommandRequest struct {
 	AgentID string `json:"agent_id"`
 	Command string `json:"command"`
+}
+// Helper to generate a random pairing code string
+// Generate a cryptographically secure pairing code.
+func generateRandomCode() (string, error) {
+	randomBytes := make([]byte, 16)
+
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(randomBytes), nil
 }
 
 func registerHandler(db *sql.DB) http.HandlerFunc {
@@ -120,5 +136,62 @@ func sendCommandHandler() http.HandlerFunc {
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Command dispatched to agent successfully!"))
+	}
+}
+// Handler for POST /pair/start
+func handlePairStart(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// TODO: Replace this with the authenticated user's ID.
+		// Your users table uses UUID, so userID must be a UUID string.
+		userID := "" // Replace with a real existing user's UUID for testing.
+
+		if userID == "" {
+			http.Error(w, "Authentication required", http.StatusUnauthorized)
+			return
+		}
+
+		// 1. Generate a random pairing code.
+		plainCode, err := generateRandomCode()
+		if err != nil {
+			http.Error(w, "Failed to generate code",
+				http.StatusInternalServerError)
+			return
+		}
+
+		// 2. Hash the code before storing it.
+		hashBytes := sha256.Sum256([]byte(plainCode))
+		codeHash := hex.EncodeToString(hashBytes[:])
+
+		// 3. Expire the code after two minutes.
+		expiresAt := time.Now().UTC().Add(2 * time.Minute)
+
+		// 4. Save the pairing code hash.
+		query := `
+			INSERT INTO pairing_codes (user_id, code_hash, expires_at, used)
+			VALUES ($1, $2, $3, FALSE)
+		`
+
+		_, err = db.Exec(query, userID, codeHash, expiresAt)
+		if err != nil {
+			http.Error(w, "Failed to save pairing code",
+				http.StatusInternalServerError)
+			return
+		}
+
+		// 5. Return the plaintext code to the client.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+
+		if err := json.NewEncoder(w).Encode(map[string]string{
+			"pairing_code": plainCode,
+			"expires_at":   expiresAt.Format(time.RFC3339),
+		}); err != nil {
+			fmt.Println("Failed to write pairing response:", err)
+		}
 	}
 }
