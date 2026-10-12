@@ -41,3 +41,11 @@ Short, honest decisions for each phase. 1-2 lines per big choice.
 - **End-to-end used small throwaway programs.** Tested against a fresh relay (`script` + real CLI) to prove the JSON protocol works, not just unit tests.
 - **Docs are minimal and useful.** `README.md` shows the flow, protocol table, configs. `LEARN.md` records 5 ideas, 3 questions, file locations for each phase. `DECISIONS.md` explains "why".
 - **Safety first.** Never commit `.env`; never push; never print secrets; only `sha256` in the DB.
+
+## Phase 7 — Hardening
+- **Allowlist, not blocklist.** Commands run without approval only if they exactly match a tiny read-only allowlist (`ls`, `pwd`, `git status`, `git diff`, `git log`) AND contain no shell metacharacters; they run with explicit argv, no shell. Everything else goes to 60s phone approval, denied by default; approved commands may use `sh -c`. A blocklist can never enumerate every dangerous command; a deny-by-default allowlist does not have to.
+- **A project folder is mandatory and not a sandbox.** No home-directory default. The folder must be absolute, exist, resolve symlinks (`EvalSymlinks`), and not be `/` or home. Docs now say explicitly: this is scoping, not OS sandboxing.
+- **Ownership never changes.** Pairing no longer uses `ON CONFLICT (agent_id) DO UPDATE SET user_id = ...`. Claiming an agent owned by another account returns 409; minting a device token for another account's agent returns 403. A server-generated `agent_id` would remove the collision problem entirely and is the natural next step.
+- **No message bodies in logs.** The relay logs only `type`, `role`, and message size. Command/prompt payloads are business data, not diagnostics.
+- **Password policy.** 10–128 characters (runes), enforced at register and login (the login check also avoids burning argon2 on out-of-policy guesses).
+- **Tests encode the guarantees.** `TestAgentOwnershipCannotBeStolen` proves user B cannot take over or un-revoke user A's agent/device.

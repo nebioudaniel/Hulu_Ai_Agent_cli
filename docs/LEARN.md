@@ -137,4 +137,27 @@ Where:
 
 ---
 
+## Phase 7 — Hardening (allowlist, ownership, logging, passwords)
+
+### 5 ideas you must understand
+1. A blocklist can never be complete; an allowlist can. Only five read-only commands run without approval (`ls`, `pwd`, `git status`, `git diff`, `git log`), only as exact matches with zero shell metacharacters, and they are executed with explicit argv — never through a shell. A phone-typed command with a `;` or a newline is treated as arbitrary and needs 60s approval, denied by default.
+2. The project folder is not optional and it is not a sandbox. No home-directory default; it must be absolute, existing, symlink-resolved, and not `/` or `~`. A command running as your user can still touch anything you can — the folder is scoping, not confinement.
+3. Ownership is the root of trust. Removing `user_id` from the `ON CONFLICT` update means pairing can never silently transfer an agent between accounts: a foreign claim is 409, a foreign device-token mint is 403, and a foreign revoke matches zero rows.
+4. Logs are for debugging the plumbing, not for reviewing secrets. The relay logs only message `type`, `role`, and byte size; full payloads (commands, prompts, results) never reach the server log.
+5. Password policy is a cheap, high-value guard: 10–128 characters (runes), checked on register and again on login so a 10,000-char guess never reaches an argon2 hash.
+
+Where:
+- Allowlist + no-shell exec: `cli/safe_cmd.go:allowlistedCommands`, `cli/safe_cmd.go:isAutoRun`, `cli/safe_cmd.go:runDirect`, `cli/ui.go` (commandMsg / approvalResponseMsg)
+- Project folder: `cli/config.go:resolveProjectDir`, `cli/main.go` (no home fallback)
+- Ownership: `relay/handlers.go:handlePairClaim` (409 + no owner upsert), `relay/handlers.go:deviceTokenHandler` (user_id removed from upsert), `relay/routing_test.go:TestAgentOwnershipCannotBeStolen`
+- Logging: `relay/websocket.go:messageType` + the `Received role=... type=... bytes=...` log line
+- Passwords: `relay/auth.go:validPassword`, `relay/auth.go:minPasswordChars`/`:maxPasswordChars`, `relay/handlers.go` (register + login), `relay/auth_test.go:TestValidPasswordBoundaries`
+
+### 3 interviewer questions
+1. Why is an allowlist safer than a blocklist, and where exactly does a command cross from "auto-run" to "needs approval"?
+2. User B claims `agent_id` that User A already paired. Walk the code path and the HTTP status the relay returns at every step.
+3. Where in the codebase would a message body still leak into a log or a script subprocess, and how did this phase close those holes?
+
+---
+
 Rule for this file: append a new section at the end of every phase.
