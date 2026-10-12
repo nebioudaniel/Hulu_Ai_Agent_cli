@@ -2,13 +2,14 @@ package main
 
 import (
 	"crypto/rand" // generate a secure random salt
-	"encoding/hex"
-	//	"encoding/hex"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"golang.org/x/crypto/argon2" // proved the argon2 provides the password-hashing algorizam
 	"strings"
+	"unicode/utf8"
+
+	"golang.org/x/crypto/argon2"
 )
 
 const (
@@ -17,7 +18,17 @@ const (
 	parallelism = 2
 	saltLength  = 16
 	keyLength   = 32
+
+	minPasswordChars = 10
+	maxPasswordChars = 128
 )
+
+// validPassword enforces the account password policy in characters (not
+// bytes): at least 10 and at most 128.
+func validPassword(password string) bool {
+	n := utf8.RuneCountInString(password)
+	return n >= minPasswordChars && n <= maxPasswordChars
+}
 
 func HashPassword(password string) (string, error) {
 	salt := make([]byte, saltLength) // fills Ower 16-byte slice with cryptographically secure random bytes.

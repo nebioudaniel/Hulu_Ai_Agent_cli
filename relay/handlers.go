@@ -69,6 +69,10 @@ func registerHandler(db *sql.DB) http.HandlerFunc {
 			http.Error(w, "Email and password are required", http.StatusBadRequest)
 			return
 		}
+		if !validPassword(req.Password) {
+			http.Error(w, "Password must be between 10 and 128 characters", http.StatusBadRequest)
+			return
+		}
 
 		hash, err := HashPassword(req.Password)
 		if err != nil {
@@ -110,6 +114,10 @@ func loginHandler(db *sql.DB) http.HandlerFunc {
 
 		if req.Email == "" || req.Password == "" {
 			http.Error(w, "Email and password are required", http.StatusBadRequest)
+			return
+		}
+		if !validPassword(req.Password) {
+			http.Error(w, "Password must be between 10 and 128 characters", http.StatusBadRequest)
 			return
 		}
 

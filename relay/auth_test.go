@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestHashAndCheckPassword(t *testing.T) {
 	hash, err := HashPassword("correct horse battery staple")
@@ -39,5 +42,29 @@ func TestHashPasswordDifferentSalts(t *testing.T) {
 func TestCheckPasswordBadEncoding(t *testing.T) {
 	if _, err := CheckPassword("x", "not-a-valid-hash"); err == nil {
 		t.Fatal("expected error for malformed hash")
+	}
+}
+
+func TestValidPasswordBoundaries(t *testing.T) {
+	good := []string{
+		strings.Repeat("a", 10),
+		strings.Repeat("b", 128),
+		"caf\u00e9-password", // 14 runes, 15 bytes
+	}
+	for _, pw := range good {
+		if !validPassword(pw) {
+			t.Errorf("expected valid (len %d runes): %q", len([]rune(pw)), pw)
+		}
+	}
+
+	bad := []string{
+		"",
+		strings.Repeat("a", 9),
+		strings.Repeat("b", 129),
+	}
+	for _, pw := range bad {
+		if validPassword(pw) {
+			t.Errorf("expected invalid (len %d runes): %q", len([]rune(pw)), pw)
+		}
 	}
 }
