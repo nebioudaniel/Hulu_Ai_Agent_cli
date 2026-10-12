@@ -68,4 +68,28 @@ Where:
 
 ---
 
+## Phase 4 — Pairing and routing (device tokens, heartbeat, peer events)
+
+### 5 ideas you must understand
+1. A device token is a second, revocable credential bound to one agent. The agent uses it for tickets, so it works after your session expires and can be killed without changing your password.
+2. Routing is ownership-checked twice: at ticket time (who owns the target agent) and at forward time (same user in the manager). A different user's phone can never reach your agent.
+3. Peer events keep phones in sync: the relay broadcasts `{"type":"peer",...}` to every connected app of a user whenever an agent goes online or offline. No polling.
+4. Heartbeat is "touch per message, expire when stale". The agent pings every 20s; the relay closes and marks offline anything silent for 3 beats.
+5. Reconnect uses exponential backoff (1s, 2s, 4s, up to 30s). The model doubles the delay on each failure and resets it on a successful connect.
+
+Where:
+- Device tokens: `relay/handlers.go:deviceTokenHandler`, `relay/handlers.go:deviceTokenUser`, `cli/auth.go:fetchDeviceToken`
+- Same-user routing: `relay/websocket.go:handleWebSocket` (app case), `relay/handlers.go:wsTicketHandler`
+- Peer online/offline: `relay/websocket.go:notifyPeerStatus`, `relay/websocket.go:Manager.notifyApps`
+- Heartbeat: `relay/websocket.go:startHeartbeatMonitor`, `relay/websocket.go:Manager.expireIdleAgents`, `cli/ui.go:heartbeat`
+- Backoff: `cli/ui.go:Update` (errMsg / reconnectMsg)
+- Envelope/ping: `cli/ui.go:wsEnvelope`, `cli/ui.go:listenForCommands`, `relay/websocket.go:isPingMessage`
+
+### 3 interviewer questions
+1. Your agent token is a session token that expires in 12 hours. How does the device keep working, and how do you kill it remotely?
+2. Two phones of the same user are connected, plus one of another user. Show where in code the wrong phone is blocked.
+3. The agent stops sending heartbeats. Walk through exactly what the relay does and what the phone sees.
+
+---
+
 Rule for this file: append a new section at the end of every phase.

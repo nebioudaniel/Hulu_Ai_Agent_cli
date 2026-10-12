@@ -59,20 +59,22 @@ type LogEntry struct {
 }
 
 type model struct {
-	serverAddr  string
-	agentID     string
-	token       string
-	connected   bool
-	statusMsg   string
-	conn        *websocket.Conn
-	width       int
-	height      int
-	showPairing bool
-	showLogs    bool
-	pairingCode string
-	qrString    string
-	pairingErr  string
-	logs        []LogEntry
+	serverAddr     string
+	agentID        string
+	token          string
+	deviceToken    string
+	connected      bool
+	statusMsg      string
+	conn           *websocket.Conn
+	width          int
+	height         int
+	showPairing    bool
+	showLogs       bool
+	pairingCode    string
+	qrString       string
+	pairingErr     string
+	logs           []LogEntry
+	reconnectDelay time.Duration
 }
 
 // Custom messages
@@ -90,22 +92,42 @@ type pairingFetchedMsg struct {
 	qr   string
 	err  string
 }
+type deviceTokenMsg struct {
+	token string
+	err   error
+}
+type reconnectMsg struct{}
+type heartbeatTickMsg struct{}
+type ignoredMsg struct{}
 
-func initialModel(serverAddr, agentID, token string) model {
+// wsEnvelope is the JSON wrapper for messages between the app and the agent.
+type wsEnvelope struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+}
+
+const (
+	heartbeatInterval = 20 * time.Second
+	maxReconnectDelay = 30 * time.Second
+)
+
+func initialModel(serverAddr, agentID, token, deviceToken string) model {
 	return model{
-		serverAddr: serverAddr,
-		agentID:    agentID,
-		token:      token,
-		connected:  false,
-		statusMsg:  "Connecting to relay server...",
+		serverAddr:     serverAddr,
+		agentID:        agentID,
+		token:          token,
+		deviceToken:    deviceToken,
+		connected:      false,
+		statusMsg:      "Connecting to relay server...",
+		reconnectDelay: time.Second,
 	}
 }
 
 // Async WebSocket connection. A short-lived one-time ticket is fetched first,
-// so the long-lived session token never appears in a URL.
-func connectWebSocket(serverAddr, token, agentID string) tea.Cmd {
+// so the long-lived session/device tokens never appear in a URL.
+func connectWebSocket(serverAddr, token, deviceToken, agentID string) tea.Cmd {
 	return func() tea.Msg {
-		ticket, status, err := fetchTicket(serverAddr, token, "agent", agentID)
+		ticket, status, err := fetchTicket(serverAddr, token, deviceToken, "agent", agentID)
 		if err != nil {
 			if status == http.StatusUnauthorized {
 				return authErrMsg{err: err}
@@ -122,14 +144,69 @@ func connectWebSocket(serverAddr, token, agentID string) tea.Cmd {
 	}
 }
 
+// ensureDeviceToken registers this agent with the relay and saves a revocable
+// device token so WebSocket tickets no longer need the session token.
+func ensureDeviceToken(serverAddr, token, agentID string) tea.Cmd {
+	return func() tea.Msg {
+		if token == "" || agentID == "" {
+			return deviceTokenMsg{}
+		}
+		raw, status, err := fetchDeviceToken(serverAddr, token, agentID)
+		if err != nil {
+			return deviceTokenMsg{err: fmt.Errorf("device token (HTTP %d): %w", status, err)}
+		}
+		return deviceTokenMsg{token: raw}
+	}
+}
+
 func listenForCommands(conn *websocket.Conn) tea.Cmd {
 	return func() tea.Msg {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			return errMsg{err: err}
 		}
-		return commandMsg{cmdStr: string(message)}
+		var env wsEnvelope
+		if err := json.Unmarshal(message, &env); err != nil {
+			// Tolerate legacy plain-text commands.
+			return commandMsg{cmdStr: string(message)}
+		}
+		switch env.Type {
+		case "command":
+			if env.Command == "" {
+				return ignoredMsg{}
+			}
+			return commandMsg{cmdStr: env.Command}
+		default:
+			// Pings and unknown control messages keep the link alive but need
+			// no local action.
+			return ignoredMsg{}
+		}
 	}
+}
+
+// heartbeat keeps the relay online: it updates last-seen on the server so the
+// relay does not declare this agent offline.
+func heartbeat(conn *websocket.Conn) tea.Cmd {
+	return tea.Tick(heartbeatInterval, func(t time.Time) tea.Msg {
+		if conn != nil {
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"ping"}`))
+		}
+		return heartbeatTickMsg{}
+	})
+}
+
+// sendResult pushes a command result back to the phone over the WebSocket.
+func sendResult(conn *websocket.Conn, cmdStr, output string, isErr bool) {
+	resp, err := json.Marshal(map[string]any{
+		"type":    "command_result",
+		"command": cmdStr,
+		"output":  output,
+		"ok":      !isErr,
+	})
+	if err != nil || conn == nil {
+		return
+	}
+	_ = conn.WriteMessage(websocket.TextMessage, resp)
 }
 
 // Executes a shell command locally and sends the output back through the WebSocket
@@ -152,9 +229,7 @@ func executeAndRespond(conn *websocket.Conn, cmdStr string) tea.Cmd {
 			response = string(output)
 		}
 
-		if conn != nil {
-			_ = conn.WriteMessage(websocket.TextMessage, []byte(response))
-		}
+		sendResult(conn, cmdStr, response, isErr)
 
 		return commandResultMsg{
 			cmdStr: cmdStr,
@@ -252,7 +327,10 @@ func renderMiniQR(q *qrcode.QRCode, factor int) string {
 }
 
 func (m model) Init() tea.Cmd {
-	return connectWebSocket(m.serverAddr, m.token, m.agentID)
+	return tea.Batch(
+		connectWebSocket(m.serverAddr, m.token, m.deviceToken, m.agentID),
+		ensureDeviceToken(m.serverAddr, m.token, m.agentID),
+	)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -289,8 +367,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case connectedMsg:
 		m.connected = true
 		m.conn = msg.conn
+		m.reconnectDelay = time.Second
 		m.statusMsg = "Active & listening"
-		return m, listenForCommands(m.conn)
+		return m, tea.Batch(
+			listenForCommands(m.conn),
+			heartbeat(m.conn),
+		)
+
+	case deviceTokenMsg:
+		if msg.token != "" {
+			m.deviceToken = msg.token
+			sess := session{Server: m.serverAddr, Token: m.token, AgentID: m.agentID, DeviceToken: m.deviceToken}
+			_ = saveSession(sess)
+		}
 
 	case commandMsg:
 		m.statusMsg = fmt.Sprintf("Executing: %s", msg.cmdStr)
@@ -309,6 +398,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 
+	case heartbeatTickMsg:
+		return m, heartbeat(m.conn)
+
+	case ignoredMsg:
+		return m, listenForCommands(m.conn)
+
 	case pairingFetchedMsg:
 		if msg.err != "" {
 			m.pairingErr = msg.err
@@ -323,11 +418,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMsg = "Session expired. Restart to log in."
 		return m, nil
 
+	case reconnectMsg:
+		return m, connectWebSocket(m.serverAddr, m.token, m.deviceToken, m.agentID)
+
 	case errMsg:
 		m.connected = false
-		m.statusMsg = "Connection failed (Retrying...)"
-		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
-			return connectWebSocket(m.serverAddr, m.token, m.agentID)()
+		m.conn = nil
+		delay := m.reconnectDelay
+		m.reconnectDelay *= 2
+		if m.reconnectDelay > maxReconnectDelay {
+			m.reconnectDelay = maxReconnectDelay
+		}
+		m.statusMsg = fmt.Sprintf("Connection lost, retrying in %s", delay)
+		return m, tea.Tick(delay, func(t time.Time) tea.Msg {
+			return reconnectMsg{}
 		})
 	}
 

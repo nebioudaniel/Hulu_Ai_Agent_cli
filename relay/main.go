@@ -72,6 +72,8 @@ func main() {
 
 	sessionTTL = envDuration("SESSION_TTL", sessionTTL)
 	ticketTTL = envDuration("TICKET_TTL", ticketTTL)
+	heartbeatInterval = envDuration("HEARTBEAT_INTERVAL", heartbeatInterval)
+	heartbeatTimeout = envDuration("HEARTBEAT_TIMEOUT", heartbeatInterval*heartbeatMaxMisses)
 	allowedOrigins = envList("ALLOWED_ORIGINS")
 
 	databaseURL := envOr("DATABASE_URL", "")
@@ -96,21 +98,29 @@ func main() {
 	log.Println("Database initialized")
 
 	store := dbSessionStore{db: db}
+	mux := newMux(db, store)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", healthHandler(db))
-	mux.HandleFunc("/register", registerHandler(db))
-	mux.HandleFunc("/login", loginHandler(db))
-	mux.HandleFunc("/ws", handleWebSocket(db))
-	mux.HandleFunc("/ws/ticket", requireAuth(store, wsTicketHandler(db)))
-	mux.HandleFunc("/command", requireAuth(store, sendCommandHandler(db)))
-	mux.HandleFunc("/pair/start", requireAuth(store, handlePairStart(db)))
-	mux.HandleFunc("/pair/claim", requireAuth(store, handlePairClaim(db)))
-	mux.HandleFunc("/devices/revoke", requireAuth(store, revokeDeviceHandler(db)))
+	go startHeartbeatMonitor()
 
 	addr := envOr("RELAY_ADDR", defaultAddr)
 	log.Printf("Server running on http://%s", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// newMux wires every route. Kept separate so tests can run a real HTTP server.
+func newMux(db *sql.DB, store sessionStore) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthHandler(db))
+	mux.HandleFunc("/register", registerHandler(db))
+	mux.HandleFunc("/login", loginHandler(db))
+	mux.HandleFunc("/ws", handleWebSocket(db))
+	mux.HandleFunc("/ws/ticket", wsTicketHandler(db))
+	mux.HandleFunc("/command", requireAuth(store, sendCommandHandler(db)))
+	mux.HandleFunc("/pair/start", requireAuth(store, handlePairStart(db)))
+	mux.HandleFunc("/pair/claim", requireAuth(store, handlePairClaim(db)))
+	mux.HandleFunc("/devices/token", requireAuth(store, deviceTokenHandler(db)))
+	mux.HandleFunc("/devices/revoke", requireAuth(store, revokeDeviceHandler(db)))
+	return mux
 }

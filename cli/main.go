@@ -20,7 +20,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	p := tea.NewProgram(initialModel(*serverPtr, *idPtr, sess.Token), tea.WithAltScreen())
+	p := tea.NewProgram(initialModel(*serverPtr, *idPtr, sess.Token, sess.DeviceToken), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error running TUI: %v\n", err)
 		os.Exit(1)

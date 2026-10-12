@@ -394,9 +394,40 @@ func revokeDeviceHandler(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+// deviceTokenUser resolves a user + agent from the X-Device-Token header.
+// Device tokens are issued per agent, stored as hashes, and are revocable.
+func deviceTokenUser(db *sql.DB, r *http.Request) (userID, agentID string, valid bool) {
+	raw := r.Header.Get("X-Device-Token")
+	if raw == "" {
+		return "", "", false
+	}
+	err := db.QueryRow(
+		"SELECT user_id, agent_id FROM devices WHERE token_hash = $1 AND revoked_at IS NULL",
+		hashToken(raw),
+	).Scan(&userID, &agentID)
+	if err != nil {
+		return "", "", false
+	}
+	return userID, agentID, true
+}
+
+func sessionTokenUser(db *sql.DB, r *http.Request) (string, bool) {
+	raw := bearerToken(r)
+	if raw == "" {
+		return "", false
+	}
+	store := dbSessionStore{db: db}
+	userID, err := store.sessionUserID(r.Context(), hashToken(raw), time.Now().UTC())
+	if err != nil {
+		return "", false
+	}
+	return userID, true
+}
+
 // wsTicketHandler issues a short-lived, one-time ticket used to open a
-// WebSocket. The long-lived session token stays in the Authorization header and
-// never appears in a URL.
+// WebSocket. Authentication comes from a session Bearer token or from a
+// revocable X-Device-Token for the agent itself. The long-lived secret never
+// appears in a URL.
 func wsTicketHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -405,9 +436,17 @@ func wsTicketHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		userID := userIDFromContext(r.Context())
+		deviceAgentID := ""
 		if userID == "" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
+			var ok bool
+			userID, deviceAgentID, ok = deviceTokenUser(db, r)
+			if !ok {
+				userID, ok = sessionTokenUser(db, r)
+				if !ok {
+					http.Error(w, "Unauthorized", http.StatusUnauthorized)
+					return
+				}
+			}
 		}
 
 		var req struct {
@@ -425,6 +464,12 @@ func wsTicketHandler(db *sql.DB) http.HandlerFunc {
 		}
 		if req.Role == "agent" && req.AgentID == "" {
 			http.Error(w, "agent_id is required for role agent", http.StatusBadRequest)
+			return
+		}
+
+		// A device token is bound to one agent and cannot jump to another.
+		if deviceAgentID != "" && req.Role == "agent" && req.AgentID != deviceAgentID {
+			http.Error(w, "Device token does not match agent", http.StatusForbidden)
 			return
 		}
 
@@ -466,6 +511,73 @@ func wsTicketHandler(db *sql.DB) http.HandlerFunc {
 			"expires_at": expiresAt.Format(time.RFC3339),
 		}); err != nil {
 			log.Printf("ws/ticket: encode response: %v", err)
+		}
+	}
+}
+
+// deviceTokenHandler issues a revocable device token for the authenticated
+// user's agent. The agent uses it for WebSocket tickets, so it survives session
+// expiry and can be revoked without touching the password.
+func deviceTokenHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		userID := userIDFromContext(r.Context())
+		if userID == "" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		var req struct {
+			AgentID string `json:"agent_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.AgentID == "" {
+			http.Error(w, "agent_id is required", http.StatusBadRequest)
+			return
+		}
+
+		// An agent id belongs to at most one user.
+		var owner string
+		err := db.QueryRow("SELECT user_id FROM devices WHERE agent_id = $1", req.AgentID).Scan(&owner)
+		if err == nil && owner != userID {
+			http.Error(w, "Agent belongs to another account", http.StatusForbidden)
+			return
+		}
+		if err != nil && err != sql.ErrNoRows {
+			http.Error(w, "Database error", http.StatusInternalServerError)
+			return
+		}
+
+		raw, err := newToken()
+		if err != nil {
+			http.Error(w, "Failed to create device token", http.StatusInternalServerError)
+			return
+		}
+
+		_, err = db.Exec(
+			`INSERT INTO devices (user_id, agent_id, token_hash, revoked_at)
+			 VALUES ($1, $2, $3, NULL)
+			 ON CONFLICT (agent_id) DO UPDATE
+			 SET user_id = $1, token_hash = $3, revoked_at = NULL, paired_at = NOW()`,
+			userID, req.AgentID, hashToken(raw),
+		)
+		if err != nil {
+			http.Error(w, "Failed to save device token", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]string{
+			"device_token": raw,
+		}); err != nil {
+			log.Printf("devices/token: encode response: %v", err)
 		}
 	}
 }

@@ -19,9 +19,11 @@ const httpTimeout = 10 * time.Second
 // session is the locally saved login state. The token is stored with 0600
 // permissions in the user config directory.
 type session struct {
-	Server    string `json:"server"`
-	Token     string `json:"token"`
-	ExpiresAt string `json:"expires_at"`
+	Server      string `json:"server"`
+	Token       string `json:"token"`
+	ExpiresAt   string `json:"expires_at"`
+	AgentID     string `json:"agent_id"`
+	DeviceToken string `json:"device_token"`
 }
 
 func sessionPath() (string, error) {
@@ -122,10 +124,11 @@ func login(server string) (session, error) {
 	return s, nil
 }
 
-// fetchTicket asks the relay for a one-time WebSocket ticket. The HTTP status
-// is returned so the caller can tell an expired session (401) from a network
-// problem.
-func fetchTicket(server, token, role, agentID string) (string, int, error) {
+// fetchTicket asks the relay for a one-time WebSocket ticket. A device token is
+// preferred (revocable, no session needed); otherwise the session token is used
+// as a Bearer. The HTTP status is returned so the caller can tell an expired
+// session (401) from a network problem.
+func fetchTicket(server, token, deviceToken, role, agentID string) (string, int, error) {
 	body := map[string]string{"role": role}
 	if agentID != "" {
 		body["agent_id"] = agentID
@@ -134,7 +137,7 @@ func fetchTicket(server, token, role, agentID string) (string, int, error) {
 	var resp struct {
 		Ticket string `json:"ticket"`
 	}
-	status, err := postJSON(server, "/ws/ticket", token, body, &resp)
+	status, err := postJSONAuth(server, "/ws/ticket", token, deviceToken, body, &resp)
 	if err != nil {
 		return "", 0, err
 	}
@@ -144,8 +147,30 @@ func fetchTicket(server, token, role, agentID string) (string, int, error) {
 	return resp.Ticket, status, nil
 }
 
+// fetchDeviceToken asks the relay for a revocable device token for this agent.
+// It is stored locally and used for WebSocket tickets from then on.
+func fetchDeviceToken(server, token, agentID string) (string, int, error) {
+	var resp struct {
+		DeviceToken string `json:"device_token"`
+	}
+	status, err := postJSON(server, "/devices/token", token, map[string]string{"agent_id": agentID}, &resp)
+	if err != nil {
+		return "", 0, err
+	}
+	if status != http.StatusOK || resp.DeviceToken == "" {
+		return "", status, fmt.Errorf("device token request failed (HTTP %d)", status)
+	}
+	return resp.DeviceToken, status, nil
+}
+
 // postJSON sends a JSON POST to the relay and decodes the JSON reply on success.
 func postJSON(server, path, token string, body, out any) (int, error) {
+	return postJSONAuth(server, path, token, "", body, out)
+}
+
+// postJSONAuth sends a JSON POST with an optional Authorization Bearer and an
+// optional X-Device-Token header, then decodes the JSON reply on success.
+func postJSONAuth(server, path, token, deviceToken string, body, out any) (int, error) {
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return 0, err
@@ -158,6 +183,9 @@ func postJSON(server, path, token string, body, out any) (int, error) {
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if deviceToken != "" {
+		req.Header.Set("X-Device-Token", deviceToken)
 	}
 
 	client := &http.Client{Timeout: httpTimeout}
