@@ -212,6 +212,18 @@ func isPingMessage(msg []byte) bool {
 	return m.Type == "ping"
 }
 
+// messageType extracts the "type" field of a message for logging. Never log
+// the message body itself.
+func messageType(msg []byte) string {
+	var m struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(msg, &m); err != nil {
+		return "unknown"
+	}
+	return m.Type
+}
+
 // ticketIdentity is the server-side truth for a WebSocket connection.
 type ticketIdentity struct {
 	userID  string
@@ -303,7 +315,7 @@ func handleWebSocket(db *sql.DB) http.HandlerFunc {
 				return
 			}
 
-			log.Printf("Received from [%s:%s]: %s", id.role, id.agentID, string(msg))
+			log.Printf("Received role=%s type=%s bytes=%d", id.role, messageType(msg), len(msg))
 
 			switch id.role {
 			case "app":
