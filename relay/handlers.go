@@ -195,3 +195,52 @@ func handlePairStart(db *sql.DB) http.HandlerFunc {
 		}
 	}
 }
+// Handler for POST /pair/claim
+func handlePairClaim(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			PairingCode string `json:"pairing_code"`
+			AgentID     string `json:"agent_id"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// 1. Hash the incoming code to match what's in the DB
+		hashBytes := sha256.Sum256([]byte(req.PairingCode))
+		codeHash := hex.EncodeToString(hashBytes[:])
+
+		// 2. Query the database for a valid, unused, unexpired code
+		var codeID int
+		var userID string
+		query := `
+			SELECT id, user_id FROM pairing_codes 
+			WHERE code_hash = $1 AND used = false AND expires_at > NOW()
+		`
+		err := db.QueryRow(query, codeHash).Scan(&codeID, &userID)
+		if err != nil {
+			http.Error(w, "Invalid, expired, or already used pairing code", http.StatusBadRequest)
+			return
+		}
+
+		// 3. Mark the pairing code as used (one-time use protection)
+		_, err = db.Exec("UPDATE pairing_codes SET used = true WHERE id = $1", codeID)
+		if err != nil {
+			http.Error(w, "Database error", http.StatusInternalServerError)
+			return
+		}
+
+		// Success response
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"message": "Device successfully paired!",
+		})
+	}
+}

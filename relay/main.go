@@ -70,6 +70,7 @@ func main() {
 		http.HandleFunc("/register", registerHandler(db))
 		http.HandleFunc("/login", loginHandler(db))
 		http.HandleFunc("/pair/start", handlePairStart(db))
+		http.HandleFunc("/pair/claim", handlePairClaim(db))
 		log.Println("Server running on http://localhost:8080")
 		log.Fatal(http.ListenAndServe(":8080", nil))
 }
