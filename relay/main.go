@@ -5,6 +5,7 @@ import (
 	"fmt"
 	_ "github.com/lib/pq"
 	"log"
+	"net/http"
 )
 
 func initDB(db *sql.DB) error {
@@ -57,4 +58,9 @@ func main() {
 			log.Fatalf("Password verification succeeded for wrong password!")
 		}
 		fmt.Println("Wrong password test passed!")
+		http.HandleFunc("/register", registerHandler(db))
+		http.HandleFunc("/login", loginHandler(db))
+		
+		log.Println("Server running on http://localhost:8080")
+		log.Fatal(http.ListenAndServe(":8080", nil))
 }
