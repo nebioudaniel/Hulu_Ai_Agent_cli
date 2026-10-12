@@ -116,4 +116,25 @@ Where:
 
 ---
 
+## Phase 6 — Tests and docs (hardening)
+
+### 5 ideas you must understand
+1. Tests prove the contract. Unit tests check math (tokens, rate limits), and DB-gated tests check state (pairing rules, tickets, routing).
+2. Tests should be deterministic. Rate limit windows are small, reused tokens are tested, and the test DB is separate (`agentdb_test`).
+3. End-to-end with the real binary catches protocol mistakes. Running the built CLI under `script` shows the full path working.
+4. Documentation is part of the product. `README.md` shows what it is, how it runs, and the protocol. `DECISIONS.md` explains why, not what.
+5. Keep the rule simple: append to LEARN.md at the end of every phase. Small notes now save you from forgetting later.
+
+Where:
+- Relay tests: `relay/*_test.go` (auth, tokens, middleware, ratelimit, integration, routing)
+- CLI tests: `cli/provider_test.go`, `cli/safe_cmd_test.go`, `cli/ui_test.go`
+- Docs: `README.md`, `docs/DECISIONS.md`, `docs/LEARN.md`
+
+### 3 interviewer questions
+1. Why split tests into DB-gated vs pure unit tests?
+2. What is the value of a tiny live e2e against the real binary?
+3. How do your docs help someone understand the security model in 30 seconds?
+
+---
+
 Rule for this file: append a new section at the end of every phase.
