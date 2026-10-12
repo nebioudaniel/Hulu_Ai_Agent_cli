@@ -1,3 +1,24 @@
 .DS_Store
-bin/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Databases
 *.db
+*.sqlite
+*.sqlite3
+
+# Local config files
+config.yaml
+config.yml
+config.json
+*.local
+
+# Build output and binaries
+bin/
+dist/
+relay/relay
+cli/cli
+*.exe

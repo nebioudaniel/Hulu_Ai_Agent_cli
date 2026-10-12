@@ -54,29 +54,31 @@ func main() {
 	}
 	fmt.Println("Connected to Postgres and initialized the database!")
 	password := "mysecretpassword"
-		hash, err := HashPassword(password)
-		if err != nil {
-			log.Fatalf("Failed to hash password: %v", err)
-		}
-		fmt.Printf("Generated Hash: %s\n", hash)
-	
-		match, err := CheckPassword(password, hash)
-		if err != nil || !match {
-			log.Fatalf("Password verification failed for correct password!")
-		}
-		fmt.Println("Correct password test passed!")
-	
-		wrongMatch, _ := CheckPassword("wrongpassword", hash)
-		if wrongMatch {
-			log.Fatalf("Password verification succeeded for wrong password!")
-		}
-		http.HandleFunc("/ws", handleWebSocket)
-		http.HandleFunc("/command", sendCommandHandler(db))
-		fmt.Println("Wrong password test passed!")
-		http.HandleFunc("/register", registerHandler(db))
-		http.HandleFunc("/login", loginHandler(db))
-		http.HandleFunc("/pair/start", handlePairStart(db))
-		http.HandleFunc("/pair/claim", handlePairClaim(db))
-		log.Println("Server running on http://localhost:8080")
-		log.Fatal(http.ListenAndServe(":8080", nil))
+	hash, err := HashPassword(password)
+	if err != nil {
+		log.Fatalf("Failed to hash password: %v", err)
+	}
+	fmt.Printf("Generated Hash: %s\n", hash)
+
+	match, err := CheckPassword(password, hash)
+	if err != nil || !match {
+		log.Fatalf("Password verification failed for correct password!")
+	}
+	fmt.Println("Correct password test passed!")
+
+	wrongMatch, _ := CheckPassword("wrongpassword", hash)
+	if wrongMatch {
+		log.Fatalf("Password verification succeeded for wrong password!")
+	}
+	http.HandleFunc("/ws", handleWebSocket)
+	http.HandleFunc("/command", sendCommandHandler(db))
+	fmt.Println("Wrong password test passed!")
+	http.HandleFunc("/register", registerHandler(db))
+	http.HandleFunc("/login", loginHandler(db))
+	http.HandleFunc("/pair/start", handlePairStart(db))
+	http.HandleFunc("/pair/claim", handlePairClaim(db))
+	http.HandleFunc("/ws", HandleWebSocket)
+	http.HandleFunc("/command", HandleDispatchCommand)
+	log.Println("Server running on http://localhost:8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }

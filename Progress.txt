@@ -1,87 +1,46 @@
-PROGRESS UPDATE
-Last updated: Oct 9, 2026
-Current lesson: 0.2 Set Up the Repository Layout
+AGENT CLI - PROGRESS
+Last updated: Oct 12, 2026
+Goal: finish CLI v0.1. Relay + CLI must work end to end and be safe enough to show.
 
-DONE
-- 0.1 Tools: checked go, git, and docker versions
+WHAT THE PROJECT IS
+- A Go agent CLI on my Mac, controlled from a phone.
+- relay/ : Go server (HTTP + WebSocket + Postgres). The phone and the CLI connect here.
+- cli/   : Go terminal UI (Bubble Tea). Shows a one-time QR pairing code (2 min, one use).
+- app/   : phone app. NOT part of this job. Test the phone side with curl and websocat.
+- old/   : old draft code moved here (server/, agent/, crypto/). Kept for reference.
 
-FILES AND WHAT THEY DO
-- None yet
+WHAT IS DONE (code exists)
+- relay: connects to Postgres, creates tables (users, pairing_codes, devices).
+- relay: register and login handlers. Passwords hashed with Argon2id (relay/auth.go).
+- relay: pairing start/claim. Code is sha256-hashed, expires in 2 min, one-time use.
+- relay: WebSocket manager for agents (relay/websocket.go).
+- cli: Bubble Tea UI, connects to relay, runs shell commands, shows QR and logs.
 
-DECISIONS MADE
-- Go standard library as much as possible for core components
+WHAT DOES NOT WORK YET
+- relay does NOT compile: duplicate /ws and /command routes, undefined Hub and
+  HandleWebSocket. Phase 2 will fix this.
+- Secrets are hardcoded (DB URL and test password) in relay/main.go. Phase 2 moves
+  them to environment variables.
+- No real authentication tokens yet. /command has no auth. Phase 3.
+- Old agent/ai.go reply was fake. A real provider client comes in Phase 5.
 
-I STILL DON'T FULLY UNDERSTAND
-- None
-
-OPEN PROBLEMS
-- None fannole
-PROGRESS UPDATE
-Last updated: Oct 9, 2026
-Current lesson: 1.2 Connect Go to Postgres
-
-DONE
-- 0.1 Tools: checked go, git, and docker versions
-- 0.2 Repo: set up folder layout and git init
-- 1.1 Postgres: started postgres container in Docker
-- 1.2 Go to Postgres: verified database connection using database/sql and lib/pq
-
-FILES AND WHAT THEY DO
-- relay/main.go: connects to local Postgres database and verifies connection with Ping
-
-DECISIONS MADE
-- Use lib/pq as the standard Go driver for PostgreSQL
-
-I STILL DON'T FULLY UNDERSTAND
-- None
-
-OPEN PROBLEMS
-- None
-PROGRESS UPDATE
-Last updated: Oct 9, 2026
-Current lesson: 1.3 Create Database Tables with SQL Migrations
-
-DONE
-- 0.1 Tools: checked go, git, and docker versions
-- 0.2 Repo: set up folder layout and git init
-- 1.1 Postgres: started postgres container in Docker
-- 1.2 Go to Postgres: verified database connection using database/sql and lib/pq
-
-FILES AND WHAT THEY DO
-- relay/main.go: connects to local Postgres database and verifies connection with Ping
+PLAN (phases)
+1. Clean up (DONE): move old dirs, fix module name, go mod tidy, .gitignore, Progress.txt.
+2. Make the relay run: one hub, fix routes, env secrets, 127.0.0.1 default, GET /health.
+3. Authentication: session tokens (store hash + expiry), device tokens, middleware,
+   protected /ws and /command, real user ID, CheckOrigin fix, rate limit.
+4. Pairing and routing: wire start/claim, forward only between paired devices of the
+   same user, peer online/offline, heartbeat 20s (offline after 3 misses), reconnect backoff.
+5. The agent in the CLI: real provider client (/connect), safe shell rules, approval,
+   local log.
+6. Tests and docs: tests, README, docs/DECISIONS.md.
 
 DECISIONS MADE
-- Use lib/pq as the standard Go driver for PostgreSQL
-
-I STILL DON'T FULLY UNDERSTAND
-- None
-
-OPEN PROBLEMS
-- None
-PROGRESS
-Last updated: Oct 9, 2026
-Current lesson: 2.1 User Registration Endpoint (HTTP Handlers)
-
-DONE
-- 0.1 Tools: checked go, git, and docker versions
-- 0.2 Repo: set up folder layout and git init
-- 1.1 Postgres: started postgres container in Docker
-- 1.2 Go to Postgres: verified database connection using database/sql and lib/pq
-- 1.3 SQL Migrations: created users table automatically on server startup using initDB
-- 1.4 Password Hashing: implemented HashPassword with Argon2id and salt generation
-- 1.5 Password Verification: implemented CheckPassword with constant-time comparison
-
-FILES AND WHAT THEY DO
-- relay/main.go: connects to local Postgres, initializes schema, and manages server lifecycle
-- relay/auth.go: contains HashPassword and CheckPassword for secure Argon2id operations
-
-DECISIONS MADE
-- Use lib/pq as the standard Go driver for PostgreSQL
-- Generate user IDs using Postgres built-in UUID gen_random_uuid()
-- Use Argon2id for secure password hashing and subtle.ConstantTimeCompare for verification
-
-I STILL DON'T FULLY UNDERSTAND
-- None
+- Go standard library as much as possible for core components.
+- Argon2id for password hashing; sha256 for token hashes; crypto/rand for randomness.
+- lib/pq is the Postgres driver.
+- User IDs use Postgres gen_random_uuid().
 
 OPEN PROBLEMS
-- None
+- relay does not compile yet (fix in Phase 2).
+- Hardcoded secrets still present (fix in Phase 2).

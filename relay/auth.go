@@ -4,11 +4,11 @@ import (
 	"crypto/rand" // generate a secure random salt
 	"encoding/hex"
 	//	"encoding/hex"
+	"crypto/subtle"
 	"errors"
 	"fmt"
-	"strings"
-"crypto/subtle"
 	"golang.org/x/crypto/argon2" // proved the argon2 provides the password-hashing algorizam
+	"strings"
 )
 
 const (
@@ -43,18 +43,18 @@ func CheckPassword(password, encodedHash string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-  // Decode the saved DencodedHash
-  expectedHash,err:=hex.DecodeString(parts[1])
-  if err!=nil{
-  return false ,err
-  }
-  actualHash:=argon2.IDKey(
- []byte(password),
-  salt,
-  iterations,
-  memory,
-  parallelism,
-  uint32(len(expectedHash)),
-  )
-  return subtle.ConstantTimeCompare(actualHash,expectedHash)==1,nil
+	// Decode the saved DencodedHash
+	expectedHash, err := hex.DecodeString(parts[1])
+	if err != nil {
+		return false, err
+	}
+	actualHash := argon2.IDKey(
+		[]byte(password),
+		salt,
+		iterations,
+		memory,
+		parallelism,
+		uint32(len(expectedHash)),
+	)
+	return subtle.ConstantTimeCompare(actualHash, expectedHash) == 1, nil
 }

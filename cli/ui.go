@@ -416,7 +416,7 @@ func (m model) logsBoxContent() string {
 
 	var sb strings.Builder
 	sb.WriteString(brightStyle.Render("Execution Audit Logs") + "\n\n")
-	
+
 	// Show last 3 logs for compact view
 	start := 0
 	if len(m.logs) > 3 {

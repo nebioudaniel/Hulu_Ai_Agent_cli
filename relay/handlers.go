@@ -1,15 +1,17 @@
-package main 
+package main
+
 import (
-	"net/http"
-	"database/sql"
-	"encoding/json"
-	"github.com/gorilla/websocket"
 	"crypto/rand"
-	"encoding/hex"
-	"time"
-	"fmt"
 	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"github.com/gorilla/websocket"
+	"net/http"
+	"time"
 )
+
 type LoginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
@@ -22,6 +24,7 @@ type CommandRequest struct {
 	AgentID string `json:"agent_id"`
 	Command string `json:"command"`
 }
+
 // Helper to generate a random pairing code string
 // Generate a cryptographically secure pairing code.
 func generateRandomCode() (string, error) {
@@ -146,6 +149,7 @@ func sendCommandHandler(db *sql.DB) http.HandlerFunc {
 		w.Write([]byte("Command dispatched to agent successfully!"))
 	}
 }
+
 // Handler for POST /pair/start
 func handlePairStart(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -156,7 +160,7 @@ func handlePairStart(db *sql.DB) http.HandlerFunc {
 
 		// TODO: Replace this with the authenticated user's ID.
 		// Your users table uses UUID, so userID must be a UUID string.
-   userID := "7b91f6be-9bf1-4151-a20f-b3920fbc1f9c"
+		userID := "7b91f6be-9bf1-4151-a20f-b3920fbc1f9c"
 		if userID == "" {
 			http.Error(w, "Authentication required", http.StatusUnauthorized)
 			return
@@ -202,6 +206,7 @@ func handlePairStart(db *sql.DB) http.HandlerFunc {
 		}
 	}
 }
+
 // Handler for POST /pair/claim
 func handlePairClaim(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -239,21 +244,21 @@ func handlePairClaim(db *sql.DB) http.HandlerFunc {
 
 		// 3. Mark the pairing code as used (one-time use protection)
 		_, err = db.Exec("UPDATE pairing_codes SET used = true WHERE id = $1", codeID)
-				if err != nil {
-					http.Error(w, "Database error", http.StatusInternalServerError)
-					return
-				}
-		
-				// 4. Register the agent as paired to this user!
-				_, err = db.Exec(`
+		if err != nil {
+			http.Error(w, "Database error", http.StatusInternalServerError)
+			return
+		}
+
+		// 4. Register the agent as paired to this user!
+		_, err = db.Exec(`
 					INSERT INTO devices (user_id, agent_id) 
 					VALUES ($1, $2) 
 					ON CONFLICT (agent_id) DO UPDATE SET user_id = $1, paired_at = NOW()
 				`, userID, req.AgentID)
-				if err != nil {
-					http.Error(w, "Failed to register paired device", http.StatusInternalServerError)
-					return
-				}
+		if err != nil {
+			http.Error(w, "Failed to register paired device", http.StatusInternalServerError)
+			return
+		}
 		// Success response
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
@@ -262,3 +267,45 @@ func handlePairClaim(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+// HandleDispatchCommand receives API calls from mobile/curl and forwards them to the Mac agent
+func HandleDispatchCommand(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req CommandRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+		return
+	}
+
+	Hub.Lock()
+	conn, exists := Hub.clients[req.AgentID]
+	Hub.Unlock()
+
+	// FOR TESTING: If the agent is connected via WebSocket, consider it authorized
+	if !exists {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Agent not connected to WebSocket"})
+		return
+	}
+
+	// Dispatch command down the WebSocket to your Mac
+	err := conn.WriteMessage(websocket.TextMessage, []byte(req.Command))
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to send command to agent"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "dispatched",
+		"agent":   req.AgentID,
+		"command": req.Command,
+	})
+}
