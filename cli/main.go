@@ -27,7 +27,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Project folder order: flag, env, saved config, home directory.
+	// Project folder order: flag, env, saved config. There is no home-directory
+	// default; commands only run inside an explicitly chosen folder.
 	projectDir := *projectPtr
 	if projectDir == "" {
 		projectDir = os.Getenv("AGENT_PROJECT_DIR")
@@ -35,13 +36,11 @@ func main() {
 	if projectDir == "" {
 		projectDir = cfg.ProjectDir
 	}
-	if projectDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			fmt.Printf("Could not find home directory: %v\n", err)
-			os.Exit(1)
-		}
-		projectDir = home
+
+	projectDir, err = resolveProjectDir(projectDir)
+	if err != nil {
+		fmt.Printf("Project folder: %v\n", err)
+		os.Exit(1)
 	}
 
 	p := tea.NewProgram(

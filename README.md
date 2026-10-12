@@ -76,8 +76,14 @@ go run .
 
 ```sh
 cd cli
-go run . -server 127.0.0.1:8080 -id my-macbook -project ~/code
+go run . -server 127.0.0.1:8080 -id my-macbook -project ~/code   # -project is required
 ```
+
+`-project` is mandatory: commands run only inside that folder, which must be an
+absolute, existing path (not `/` or your home directory). This is a scoping
+constraint, **not a sandbox** — a command running as you can still reach any
+file you have access to. Never point it at a directory you are not willing to
+expose.
 
 Press `p` to show the pairing code, `ctrl+p` for the command log.
 
