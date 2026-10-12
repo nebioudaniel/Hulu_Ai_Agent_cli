@@ -30,7 +30,7 @@ func initDB(db *sql.DB) error {
             id SERIAL PRIMARY KEY,
             user_id UUID REFERENCES users(id) ON DELETE CASCADE,
             code_hash TEXT NOT NULL,
-            expires_at TIMESTAMP NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
             used BOOLEAN DEFAULT FALSE
         );
         CREATE TABLE IF NOT EXISTS devices (
