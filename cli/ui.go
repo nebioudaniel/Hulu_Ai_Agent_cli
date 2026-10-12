@@ -2,12 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
-	"os/exec"
-	"runtime"
 	"strings"
 	"time"
 
@@ -59,22 +60,31 @@ type LogEntry struct {
 }
 
 type model struct {
-	serverAddr     string
-	agentID        string
-	token          string
-	deviceToken    string
-	connected      bool
-	statusMsg      string
-	conn           *websocket.Conn
-	width          int
-	height         int
-	showPairing    bool
-	showLogs       bool
-	pairingCode    string
-	qrString       string
-	pairingErr     string
-	logs           []LogEntry
-	reconnectDelay time.Duration
+	serverAddr      string
+	agentID         string
+	token           string
+	deviceToken     string
+	projectDir      string
+	provider        ProviderConfig
+	connected       bool
+	statusMsg       string
+	conn            *websocket.Conn
+	width           int
+	height          int
+	showPairing     bool
+	showLogs        bool
+	pairingCode     string
+	qrString        string
+	pairingErr      string
+	logs            []LogEntry
+	reconnectDelay  time.Duration
+	pendingApproval pendingApproval
+}
+
+// pendingApproval tracks a risky command waiting for the phone's answer.
+type pendingApproval struct {
+	requestID string
+	cmdStr    string
 }
 
 // Custom messages
@@ -99,24 +109,49 @@ type deviceTokenMsg struct {
 type reconnectMsg struct{}
 type heartbeatTickMsg struct{}
 type ignoredMsg struct{}
+type approvalResponseMsg struct {
+	requestID string
+	approved  bool
+}
+type approvalTimeoutMsg struct{ requestID string }
+type chatMsg struct{ prompt string }
+type chatResultMsg struct {
+	prompt string
+	output string
+	isErr  bool
+}
+type connectMsg struct {
+	baseURL string
+	model   string
+	apiKey  string
+}
 
 // wsEnvelope is the JSON wrapper for messages between the app and the agent.
 type wsEnvelope struct {
-	Type    string `json:"type"`
-	Command string `json:"command"`
+	Type      string `json:"type"`
+	Command   string `json:"command"`
+	Prompt    string `json:"prompt"`
+	RequestID string `json:"request_id"`
+	Approved  bool   `json:"approved"`
+	BaseURL   string `json:"base_url"`
+	Model     string `json:"model"`
+	APIKey    string `json:"api_key"`
 }
 
 const (
 	heartbeatInterval = 20 * time.Second
 	maxReconnectDelay = 30 * time.Second
+	approvalTimeout   = 60 * time.Second
 )
 
-func initialModel(serverAddr, agentID, token, deviceToken string) model {
+func initialModel(serverAddr, agentID, token, deviceToken, projectDir string, provider ProviderConfig) model {
 	return model{
 		serverAddr:     serverAddr,
 		agentID:        agentID,
 		token:          token,
 		deviceToken:    deviceToken,
+		projectDir:     projectDir,
+		provider:       provider,
 		connected:      false,
 		statusMsg:      "Connecting to relay server...",
 		reconnectDelay: time.Second,
@@ -176,6 +211,15 @@ func listenForCommands(conn *websocket.Conn) tea.Cmd {
 				return ignoredMsg{}
 			}
 			return commandMsg{cmdStr: env.Command}
+		case "approval_response":
+			return approvalResponseMsg{requestID: env.RequestID, approved: env.Approved}
+		case "chat":
+			if env.Prompt == "" {
+				return ignoredMsg{}
+			}
+			return chatMsg{prompt: env.Prompt}
+		case "connect":
+			return connectMsg{baseURL: env.BaseURL, model: env.Model, apiKey: env.APIKey}
 		default:
 			// Pings and unknown control messages keep the link alive but need
 			// no local action.
@@ -209,28 +253,72 @@ func sendResult(conn *websocket.Conn, cmdStr, output string, isErr bool) {
 	_ = conn.WriteMessage(websocket.TextMessage, resp)
 }
 
-// Executes a shell command locally and sends the output back through the WebSocket
-func executeAndRespond(conn *websocket.Conn, cmdStr string) tea.Cmd {
+// sendApprovalRequest asks the phone to approve a risky command.
+func sendApprovalRequest(conn *websocket.Conn, requestID, cmdStr string) {
+	if conn == nil {
+		return
+	}
+	msg, err := json.Marshal(map[string]any{
+		"type":       "approval_request",
+		"request_id": requestID,
+		"command":    cmdStr,
+	})
+	if err != nil {
+		return
+	}
+	_ = conn.WriteMessage(websocket.TextMessage, msg)
+}
+
+// sendChatResult pushes a chat (AI) reply back to the phone.
+func sendChatResult(conn *websocket.Conn, prompt, output string, isErr bool) {
+	if conn == nil {
+		return
+	}
+	msg, err := json.Marshal(map[string]any{
+		"type":   "chat_result",
+		"prompt": prompt,
+		"output": output,
+		"ok":     !isErr,
+	})
+	if err != nil {
+		return
+	}
+	_ = conn.WriteMessage(websocket.TextMessage, msg)
+}
+
+func newRequestID() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("req-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
+// chatCmd runs the configured provider in the background and replies to the
+// phone. It never blocks the UI.
+func chatCmd(conn *websocket.Conn, prompt string, provider ProviderConfig) tea.Cmd {
 	return func() tea.Msg {
-		var cmd *exec.Cmd
-		if runtime.GOOS == "windows" {
-			cmd = exec.Command("cmd", "/C", cmdStr)
-		} else {
-			cmd = exec.Command("sh", "-c", cmdStr)
+		output, err := provider.Chat(context.Background(), prompt)
+		isErr := err != nil
+		if isErr {
+			output = err.Error()
 		}
+		sendChatResult(conn, prompt, output, isErr)
+		return chatResultMsg{prompt: prompt, output: output, isErr: isErr}
+	}
+}
 
-		output, err := cmd.CombinedOutput()
-		var response string
-		isErr := false
-		if err != nil {
-			response = fmt.Sprintf("Error: %v\nOutput: %s", err, string(output))
-			isErr = true
-		} else {
-			response = string(output)
-		}
-
+// executeAndRespond runs a shell command inside the project folder and sends
+// the output back through the WebSocket.
+func executeAndRespond(conn *websocket.Conn, projectDir, cmdStr string) tea.Cmd {
+	return func() tea.Msg {
+		response, isErr := runCommand(projectDir, cmdStr)
 		sendResult(conn, cmdStr, response, isErr)
-
+		_ = logEvent("command_executed", map[string]any{
+			"command": cmdStr,
+			"ok":      !isErr,
+			"output":  shortOutput(response),
+		})
 		return commandResultMsg{
 			cmdStr: cmdStr,
 			output: response,
@@ -369,6 +457,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.conn = msg.conn
 		m.reconnectDelay = time.Second
 		m.statusMsg = "Active & listening"
+		_ = logEvent("connected", map[string]any{"agent_id": m.agentID, "server": m.serverAddr})
 		return m, tea.Batch(
 			listenForCommands(m.conn),
 			heartbeat(m.conn),
@@ -382,9 +471,100 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case commandMsg:
+		_ = logEvent("command_received", map[string]any{"command": msg.cmdStr, "agent_id": m.agentID})
+
+		if m.pendingApproval.requestID != "" {
+			sendResult(m.conn, msg.cmdStr, "Busy: another command is waiting for approval", true)
+			return m, listenForCommands(m.conn)
+		}
+
+		// Risky commands need the phone to approve within 60 seconds.
+		if isRisky(msg.cmdStr) {
+			id := newRequestID()
+			m.pendingApproval = pendingApproval{requestID: id, cmdStr: msg.cmdStr}
+			sendApprovalRequest(m.conn, id, msg.cmdStr)
+			m.statusMsg = "Risky command — waiting for phone approval (60s)"
+			_ = logEvent("approval_requested", map[string]any{"command": msg.cmdStr, "request_id": id})
+			return m, tea.Batch(
+				listenForCommands(m.conn),
+				tea.Tick(approvalTimeout, func(t time.Time) tea.Msg {
+					return approvalTimeoutMsg{requestID: id}
+				}),
+			)
+		}
+
 		m.statusMsg = fmt.Sprintf("Executing: %s", msg.cmdStr)
 		return m, tea.Batch(
-			executeAndRespond(m.conn, msg.cmdStr),
+			executeAndRespond(m.conn, m.projectDir, msg.cmdStr),
+			listenForCommands(m.conn),
+		)
+
+	case approvalResponseMsg:
+		if m.pendingApproval.requestID != "" && m.pendingApproval.requestID == msg.requestID {
+			cmdStr := m.pendingApproval.cmdStr
+			m.pendingApproval = pendingApproval{}
+			if !msg.approved {
+				m.statusMsg = "Command denied on phone"
+				sendResult(m.conn, cmdStr, "Denied on phone", true)
+				_ = logEvent("approval_denied", map[string]any{"command": cmdStr})
+				return m, listenForCommands(m.conn)
+			}
+			m.statusMsg = fmt.Sprintf("Approved — executing: %s", cmdStr)
+			_ = logEvent("approval_approved", map[string]any{"command": cmdStr})
+			return m, tea.Batch(
+				executeAndRespond(m.conn, m.projectDir, cmdStr),
+				listenForCommands(m.conn),
+			)
+		}
+		return m, listenForCommands(m.conn)
+
+	case approvalTimeoutMsg:
+		// Deny by default. No new listener: one is already reading.
+		if m.pendingApproval.requestID == msg.requestID {
+			cmdStr := m.pendingApproval.cmdStr
+			m.pendingApproval = pendingApproval{}
+			m.statusMsg = "Approval timed out — denied by default"
+			sendResult(m.conn, cmdStr, "Denied: no approval within 60 seconds", true)
+			_ = logEvent("approval_timeout", map[string]any{"command": cmdStr})
+		}
+		return m, nil
+
+	case chatMsg:
+		m.statusMsg = "Thinking…"
+		_ = logEvent("chat_requested", map[string]any{"prompt": shortOutput(msg.prompt)})
+		return m, tea.Batch(
+			chatCmd(m.conn, msg.prompt, m.provider),
+			listenForCommands(m.conn),
+		)
+
+	case chatResultMsg:
+		if msg.isErr {
+			m.statusMsg = "Chat failed: " + shortOutput(msg.output)
+		} else {
+			m.statusMsg = "Chat reply sent"
+		}
+		_ = logEvent("chat_result", map[string]any{"ok": !msg.isErr, "output": shortOutput(msg.output)})
+		return m, nil
+
+	case connectMsg:
+		// Never log or echo api_key.
+		m.provider = ProviderConfig{BaseURL: msg.baseURL, Model: msg.model, APIKey: msg.apiKey}
+		m.statusMsg = "Provider configured"
+		_ = logEvent("provider_configured", map[string]any{"base_url": msg.baseURL, "model": msg.model})
+
+		cfg, _ := loadConfig()
+		cfg.ProjectDir = m.projectDir
+		cfg.Provider = m.provider
+		if err := saveConfig(cfg); err != nil {
+			m.statusMsg = "Provider configured, but saving failed: " + err.Error()
+		}
+
+		if err := m.provider.Validate(); err != nil {
+			m.statusMsg = "Provider: " + err.Error()
+			return m, listenForCommands(m.conn)
+		}
+		return m, tea.Batch(
+			chatCmd(m.conn, "Reply with the single word: OK", m.provider),
 			listenForCommands(m.conn),
 		)
 
@@ -415,7 +595,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case authErrMsg:
 		m.connected = false
+		m.pendingApproval = pendingApproval{}
 		m.statusMsg = "Session expired. Restart to log in."
+		_ = logEvent("session_expired", nil)
 		return m, nil
 
 	case reconnectMsg:
@@ -424,6 +606,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.connected = false
 		m.conn = nil
+		m.pendingApproval = pendingApproval{}
+		_ = logEvent("disconnected", map[string]any{"error": msg.err.Error()})
 		delay := m.reconnectDelay
 		m.reconnectDelay *= 2
 		if m.reconnectDelay > maxReconnectDelay {
@@ -496,7 +680,7 @@ func (m model) View() string {
 
 	// ── tip line ──
 	tip := " " + tipDot.Render("●") + " " +
-		subtleStyle.Render("Tip Press 'p' to pair mobile, 'ctrl+p' to view command logs")
+		subtleStyle.Render("Tip  'p' pair · 'ctrl+p' logs · phone sends /connect · /chat · /command")
 
 	content := lipgloss.JoinVertical(lipgloss.Center,
 		strings.TrimRight(logo.String(), "\n"),

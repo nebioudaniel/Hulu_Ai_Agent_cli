@@ -92,4 +92,28 @@ Where:
 
 ---
 
+## Phase 5 — The agent in the CLI (safe commands, provider, logging)
+
+### 5 ideas you must understand
+1. A remote shell is a loaded gun: every command runs inside one chosen project folder (`cmd.Dir`), with a 30s timeout and a 10KB output cap. Never trust the directory a command asks for.
+2. Risky commands are denied by default: if the phone does not answer an approval request within 60s, the command does not run. Timeouts must fail closed, not open.
+3. One provider client covers both OpenAI and Ollama because Ollama speaks the OpenAI `/v1/chat/completions` shape. Timeouts and non-200 replies become clear errors, not hangs.
+4. Config (project folder, provider) lives in one JSON file written 0600, and secrets (API keys, tokens) are never logged or echoed back.
+5. Every action is appended to a local JSONL audit log, but output is truncated when logged so a big command cannot bloat the file.
+
+Where:
+- Safe execution: `cli/safe_cmd.go:runCommand`, `cli/safe_cmd.go:isRisky`
+- Approval flow: `cli/ui.go` (commandMsg / approvalResponseMsg / approvalTimeoutMsg), `cli/ui.go:sendApprovalRequest`
+- Provider client: `cli/provider.go:ProviderConfig.Chat`, `cli/provider.go:ProviderConfig.Validate`
+- Config: `cli/config.go:loadConfig`, `cli/config.go:saveConfig`
+- Logging: `cli/events.go:logEvent`, `cli/events.go:shortOutput`
+- Protocol envelope: `cli/ui.go:wsEnvelope`, `cli/ui.go:listenForCommands`
+
+### 3 interviewer questions
+1. A phone asks your Mac to run `rm -rf ~`. Walk through every guard between the request and the disk.
+2. How do you support both OpenAI and a local Ollama with one client, and how do you avoid hanging forever on a slow provider?
+3. Where do secrets live on the agent, and how do you prove they never reach a log file or the relay?
+
+---
+
 Rule for this file: append a new section at the end of every phase.

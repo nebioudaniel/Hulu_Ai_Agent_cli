@@ -27,6 +27,9 @@ type session struct {
 }
 
 func sessionPath() (string, error) {
+	if p := os.Getenv("AGENT_SESSION"); p != "" {
+		return p, nil
+	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err

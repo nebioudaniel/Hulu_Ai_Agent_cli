@@ -11,6 +11,7 @@ import (
 func main() {
 	serverPtr := flag.String("server", "127.0.0.1:8080", "Relay server address")
 	idPtr := flag.String("id", "my-macbook", "Unique Agent ID")
+	projectPtr := flag.String("project", "", "Folder where remote commands are allowed to run")
 	flag.Parse()
 
 	// Log in (or reuse a saved session) before starting the UI.
@@ -20,7 +21,33 @@ func main() {
 		os.Exit(1)
 	}
 
-	p := tea.NewProgram(initialModel(*serverPtr, *idPtr, sess.Token, sess.DeviceToken), tea.WithAltScreen())
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Printf("Could not read config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Project folder order: flag, env, saved config, home directory.
+	projectDir := *projectPtr
+	if projectDir == "" {
+		projectDir = os.Getenv("AGENT_PROJECT_DIR")
+	}
+	if projectDir == "" {
+		projectDir = cfg.ProjectDir
+	}
+	if projectDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Printf("Could not find home directory: %v\n", err)
+			os.Exit(1)
+		}
+		projectDir = home
+	}
+
+	p := tea.NewProgram(
+		initialModel(*serverPtr, *idPtr, sess.Token, sess.DeviceToken, projectDir, cfg.Provider),
+		tea.WithAltScreen(),
+	)
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error running TUI: %v\n", err)
 		os.Exit(1)
