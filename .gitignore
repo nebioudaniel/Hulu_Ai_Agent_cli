@@ -21,4 +21,5 @@ bin/
 dist/
 relay/relay
 cli/cli
+tools/fakephone/fakephone
 *.exe
